@@ -60,7 +60,7 @@ async function firebaseDB() {
     watch(col, cb, opts = {}) {
       let q = fs.collection(db, col);
       if (opts.since) q = fs.query(q, fs.where('ts', '>=', opts.since));
-      return fs.onSnapshot(q, { includeMetadataChanges: !!opts.meta }, s => cb(docs(s), { fromCache: s.metadata.fromCache }), e => console.error(col, e));
+      return fs.onSnapshot(q, { includeMetadataChanges: !!opts.meta }, s => cb(docs(s), { fromCache: s.metadata.fromCache }), e => { console.error(col, e); cb([], { fromCache: false, error: e }); });
     },
     async get(col, id) { const s = await fs.getDoc(fs.doc(db, col, id)); return s.exists() ? { id: s.id, ...s.data() } : null; },
     async all(col) { return docs(await fs.getDocs(fs.collection(db, col))); },
@@ -74,6 +74,12 @@ async function firebaseDB() {
       return docs(await fs.getDocs(q));
     },
     newId(col) { return fs.doc(fs.collection(db, col)).id; },
+    // waits until the server has the data (used for first-login setup)
+    async commitWait(ops) {
+      const b = fs.writeBatch(db);
+      for (const o of ops) b.set(fs.doc(db, o.col, o.id), conv(o.data), { merge: o.op !== 'set' || !!o.merge });
+      await b.commit();
+    },
     // ops: [{op:'set'|'update'|'delete', col, id, data}] -> atomic, works offline
     commit(ops) {
       const b = fs.writeBatch(db);
@@ -129,6 +135,7 @@ function localDB() {
     async range(col, from, to, field = 'ts') { return list(col).filter(d => d[field] >= from && d[field] <= to).sort((a, b) => b[field] > a[field] ? 1 : -1); },
     async where(col, field, val) { return list(col).filter(d => d[field] === val); },
     newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); },
+    async commitWait(ops) { return this.commit(ops); },
     commit(ops) {
       const touched = new Set();
       for (const o of ops) {

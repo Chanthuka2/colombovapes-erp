@@ -154,7 +154,7 @@ function startWatchers() {
     if (!S.me && m.fromCache && navigator.onLine) return;
     ready.emp = true; go();
   }, { meta: true }));
-  unsubs.push(S.db.watch('meta', list => { S.meta = list.find(d => d.id === 'settings') || {}; ready.meta = true; go(); if (S._started) rerenderSoft(); }));
+  unsubs.push(S.db.watch('meta', (list, m = {}) => { S.meta = list.find(d => d.id === 'settings') || S.meta || {}; ready.meta = true; go(); if (S._started && !m.error) rerenderSoft(); }));
   unsubs.push(S.db.watch('products', list => {
     S.products = list.map(p => ({ ...p, code: p.code || p.id })).sort(by('name'));
     S.pmap = Object.fromEntries(S.products.map(p => [p.code, p]));
@@ -170,8 +170,10 @@ async function afterLogin() {
   // First login ever: make this user the admin.
   if (!S.me && S.user.username === 'admin') {
     const doc = { username: S.user.username, name: S.user.username === 'admin' ? 'Admin' : S.user.username, role: 'admin', phone: '', active: true, ts: Date.now() };
-    await commit([{ op: 'set', col: 'employees', id: S.user.username, data: doc }]);
-    S.me = { id: S.user.username, ...doc };
+    root.innerHTML = `<div class="login"><div class="card">Palaweni setup eka karanawa…</div></div>`;
+    try { await S.db.commitWait([{ op: 'set', col: 'employees', id: S.user.username, data: doc }]); }
+    catch (e) { root.innerHTML = `<div class="login"><div class="card">Setup eka fail una: ${esc(e.message)}<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
+    location.reload(); return;
   }
   if (!S.me) { root.innerHTML = `<div class="login"><div class="card">Me user ta account ekak set karala naha. Admin ta kiyanna.<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
   if (S.me.active === false) { await S.db.logout(); toast('Account eka deactive karala', true); return; }

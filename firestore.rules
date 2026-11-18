@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function uname() { return request.auth.token.email.split('@')[0]; }
+    function emp() { return get(/databases/$(database)/documents/employees/$(uname())).data; }
+    function hasEmp() { return exists(/databases/$(database)/documents/employees/$(uname())); }
+    function active() { return signedIn() && hasEmp() && emp().active != false; }
+    function admin() { return active() && emp().role == 'admin'; }
+
+    match /employees/{id} {
+      allow read: if signedIn();
+      // first ever login: the "admin" user creates its own admin record
+      allow create: if signedIn() && id == 'admin' && uname() == 'admin' && !hasEmp();
+      allow write: if admin();
+    }
+    match /meta/{id} {
+      allow read: if active();
+      allow write: if admin();
+    }
+    match /{col}/{id} {
+      allow read, write: if active();
+    }
+  }
+}

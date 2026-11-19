@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION on every deploy.
-const VERSION = 'cv-erp-v1.1.1';
+const VERSION = 'cv-erp-v1.1.2';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'db.js', 'config.js', 'seed.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const EXTRA = [FB + 'firebase-app.js', FB + 'firebase-firestore.js', FB + 'firebase-auth.js', 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js'];
@@ -7,7 +7,7 @@ const EXTRA = [FB + 'firebase-app.js', FB + 'firebase-firestore.js', FB + 'fireb
 self.addEventListener('install', e => {
   e.waitUntil((async () => {
     const c = await caches.open(VERSION);
-    await c.addAll(SHELL);
+    await c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })));
     await Promise.all(EXTRA.map(u => c.add(new Request(u, { mode: 'cors' })).catch(() => {})));
     self.skipWaiting();
   })());
@@ -29,7 +29,7 @@ self.addEventListener('fetch', e => {
     const c = await caches.open(VERSION);
     const hit = await c.match(e.request, { ignoreSearch: !lib });
     if (lib && hit) return hit;
-    const net = fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; });
+    const net = (lib ? fetch(e.request) : fetch(e.request.url, { cache: 'no-cache' })).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; });
     try {
       return await (hit ? Promise.race([net, new Promise((_, rej) => setTimeout(() => rej('slow'), 2500))]) : net);
     } catch (err) {

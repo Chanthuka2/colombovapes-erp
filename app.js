@@ -388,7 +388,7 @@ VIEWS.pos = {
           <input id="idisc" placeholder="Discount (e.g. 500 or 5%)" style="max-width:200px">
         </div>
         <div style="padding:0 16px 16px" class="row">
-          <button class="btn" id="hold">${ic('pause')}Hold</button><button class="btn" id="recall">Recall <span class="tag" id="hc">0</span></button>
+          <button class="btn" id="hold">${ic('pause')}Hold</button><button class="btn" id="recall">Recall <span class="tag" id="hc">0</span></button><button class="btn" id="hist">${ic('reports')}Bills</button>
           <button class="btn d" id="clr">${ic('trash')}Clear</button><span class="grow"></span>
           <button class="btn p lg" id="pay">${ic('pay')}Pay (F9)</button>
         </div>
@@ -494,6 +494,7 @@ VIEWS.pos = {
       const h = held(); h.push({ ts: Date.now(), cart: S.cart, customerId: S.customerId, priceType: S.priceType, disc: S.invDisc, total: cartTotals().total });
       localStorage.setItem(LK('cv_held'), JSON.stringify(h)); S.cart = []; S.invDisc = ''; drawCart(); toast('Bill put on hold');
     };
+    $('#hist', el).onclick = billHistory;
     $('#recall', el).onclick = () => {
       const h = held(); if (!h.length) return toast('No bills on hold');
       modal('Held bills', h.map((b, i) => `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><span class="grow">${fmtDT(b.ts)} · ${b.cart.length} items · <b>${money(b.total)}</b></span><button class="btn sm p" data-i="${i}">Open</button><button class="btn sm d" data-del="${i}">${ic('trash')}</button></div>`).join(''), {
@@ -643,6 +644,40 @@ function printReceipt(inv) {
   ${Object.entries(inv.pay || {}).filter(([, v]) => v).map(([k, v]) => `<tr><td>${k[0].toUpperCase() + k.slice(1)}</td><td style="text-align:right">${money(v)}</td></tr>`).join('')}
   ${inv.change ? `<tr><td>Change</td><td style="text-align:right">${money(inv.change)}</td></tr>` : ''}</table><hr>
   <div class="c">${esc(s.receiptFooter)}<br><small>Items: ${qtyf(sum(inv.items, 'qty'))}</small></div>`, 'receipt');
+}
+
+// Bill history (opened from the Invoice screen). Per business, like everything else.
+function billHistory() {
+  modal('Bill history', `<div class="row" style="gap:8px;flex-wrap:wrap"><input type="date" id="bhd" value="${today()}" style="max-width:170px"><div class="search grow" style="min-width:200px">${ic('search')}<input id="bhq" placeholder="Bill no / customer / phone" autocomplete="off"></div></div>
+    <div class="row" id="bhs" style="margin:10px 0;gap:8px"></div><div id="bhl" class="bhl"></div>`, {
+    wide: true,
+    onMount(m, close) {
+      let rows = [];
+      const draw = () => {
+        const q = $('#bhq', m).value.trim().toLowerCase();
+        const list = rows.filter(i => !q || [i.no, i.customerName, i.delivery?.name, i.delivery?.phone, i.delivery?.address].some(x => String(x || '').toLowerCase().includes(q)));
+        const ok = list.filter(i => i.status !== 'void');
+        $('#bhs', m).innerHTML = `<span class="tag">Bills ${ok.length}</span><span class="tag g">Total ${money(sum(ok, 'total'))}</span>${list.length - ok.length ? `<span class="tag r">Deleted ${list.length - ok.length}</span>` : ''}`;
+        $('#bhl', m).innerHTML = list.map(i => `<button class="bhr" data-id="${esc(i.id)}"><b>${esc(i.no)}</b><span class="grow"><span>${esc(i.delivery?.name || i.customerName || 'Cash')}</span><small class="muted">${fmtDT(i.ts)} · Qty ${qtyf(sum(i.items || [], "qty"))}${i.returned ? ' · returned ' + money(i.returned) : ''}</small></span>${i.status === 'void' ? '<span class="tag r">deleted</span>' : ''}<b class="num">${money(i.total)}</b></button>`).join('') || '<div class="empty">No bills</div>';
+      };
+      const load = async () => {
+        const d = $('#bhd', m).value || today();
+        $('#bhl', m).innerHTML = '<div class="empty">Loading…</div>';
+        rows = (await S.db.range('invoices', dStart(d), dStart(d) + 86399999)).sort(by('ts', true));
+        draw();
+      };
+      $('#bhd', m).onchange = load;
+      $('#bhq', m).oninput = draw;
+      $('#bhq', m).onkeydown = async e => {
+        if (e.key !== 'Enter') return;
+        const v = $('#bhq', m).value.trim(); if (!v) return;
+        const hit = rows.find(i => String(i.no).toUpperCase() === v.toUpperCase()) || await findInvoice(v);
+        if (hit) invoiceModal(hit, hit.id); else toast('Bill not found', true);
+      };
+      $('#bhl', m).onclick = e => { const b = e.target.closest('[data-id]'); if (!b) return; const i = rows.find(r => r.id === b.dataset.id); if (i) invoiceModal(i, i.id); };
+      load();
+    }
+  });
 }
 
 function invoiceModal(inv, id) {

@@ -235,3 +235,10 @@ tfoot td{font-weight:700;background:rgba(255,255,255,.05)}
   #print .rep{font-family:var(--font);width:auto}
   #print .rep h1{font-size:18px}
 }
+
+.bhl{display:flex;flex-direction:column;gap:6px;max-height:55vh;overflow:auto}
+.bhr{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:inherit;font:inherit;cursor:pointer}
+.bhr:hover{background:rgba(255,255,255,.09)}
+.bhr>b:first-child{min-width:62px}
+.bhr .grow{display:flex;flex-direction:column;min-width:0}
+.bhr .grow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

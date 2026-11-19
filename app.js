@@ -575,6 +575,35 @@ async function findInvoice(no) {
   return hit || null;
 }
 
+// Dropdown product list under a search box (GRN, Returns). Shows all active products.
+function attachSuggest(input, box, onPick, opts = {}) {
+  let idx = 0, list = [];
+  const draw = () => {
+    const s = input.value.trim().toLowerCase();
+    list = s ? S.products.filter(p => p.active !== false && (p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s) || (p.barcode || '').toLowerCase() === s)).slice(0, 15) : [];
+    idx = Math.min(idx, Math.max(0, list.length - 1));
+    if (!s) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.innerHTML = list.length ? list.map((p, i) => `<div class="si ${i === idx ? 'on' : ''}" data-code="${esc(p.code)}"><div class="grow"><b>${esc(p.name)}</b><small class="dim">${esc(p.code)} · ${esc(p.category || '')}</small></div><span class="tag ${num(p.stock) > 0 ? 'g' : 'r'}">${qtyf(p.stock)} in stock</span><b class="num">${money(opts.price ? opts.price(p) : p.retail)}</b></div>`).join('') : '<div class="si dim">No matching products</div>';
+  };
+  const pick = p => { box.style.display = 'none'; input.value = p.name; onPick(p); };
+  input.setAttribute('autocomplete', 'off');
+  input.addEventListener('input', () => { idx = 0; draw(); });
+  input.addEventListener('focus', draw);
+  input.addEventListener('blur', () => setTimeout(() => { box.style.display = 'none'; }, 180));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); idx = (idx + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % (list.length || 1); draw(); }
+    else if (e.key === 'Escape') box.style.display = 'none';
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const v = input.value.trim();
+      const exact = S.products.find(p => p.code === v || p.barcode === v || p.code === v.padStart(5, '0'));
+      if (exact) pick(exact); else if (list[idx]) pick(list[idx]); else if (opts.onMiss) opts.onMiss(v);
+    }
+  });
+  box.addEventListener('mousedown', e => { const r = e.target.closest('[data-code]'); if (!r) return; e.preventDefault(); pick(S.pmap[r.dataset.code]); });
+}
+
 // ================================================================ RETURNS
 VIEWS.returns = {
   title: () => 'Returns',
@@ -585,7 +614,7 @@ VIEWS.returns = {
       <div class="form" style="margin-top:12px"><label class="f">Refund method<select id="rm"><option value="cash">Cash refund</option><option value="credit">Deduct from customer credit</option><option value="exchange">Exchange (no refund)</option></select></label>
       <label class="f">Reason<input id="rr" placeholder="Damage / wrong item…"></label></div>
       <div class="row" style="margin-top:14px"><b class="grow" id="rt">Total: 0.00</b><button class="btn p" id="proc">Process return</button></div></div>
-  </div><br><div class="card"><h2>Return a product without an invoice</h2><div class="row"><select id="mp" class="grow" style="flex:1"><option value="">Select product</option>${S.products.map(p => opt(p.code, `${p.code} · ${p.name}`)).join('')}</select><input id="mq" placeholder="Qty" style="width:90px"><input id="mpr" placeholder="Price" style="width:120px"><button class="btn" id="madd">${ic('plus')}Add</button></div></div>`,
+  </div><br><div class="card"><h2>Return a product without an invoice</h2><div class="row"><div class="search grow" style="flex:1;min-width:220px">${ic('search')}<input id="mp" placeholder="Search product (code / name / barcode)"><div class="sugg panel" id="mpsugg"></div></div><input id="mq" placeholder="Qty" style="width:90px"><input id="mpr" placeholder="Price" style="width:120px"><button class="btn" id="madd">${ic('plus')}Add</button></div></div>`,
   mount(el) {
     let inv = null, invId = '', lines = [];
     const draw = () => {
@@ -619,8 +648,12 @@ VIEWS.returns = {
       const max = Math.max(0, num(l.qty) - ((inv._ret || {})[l.code] || 0)); if (!max) return toast('This item was already fully returned', true);
       lines.push({ code: l.code, name: l.name, qty: max, max, price: r2(unit), inv: true }); draw();
     };
-    $('#mp', el).onchange = e => { const p = S.pmap[e.target.value]; if (p) $('#mpr', el).value = p.retail; };
-    $('#madd', el).onclick = () => { const p = S.pmap[$('#mp', el).value]; if (!p) return; lines.push({ code: p.code, name: p.name, qty: num($('#mq', el).value) || 1, price: num($('#mpr', el).value) }); draw(); };
+    let mSel = null;
+    attachSuggest($('#mp', el), $('#mpsugg', el), p => { mSel = p; $('#mpr', el).value = p.retail; $('#mq', el).value = 1; $('#mq', el).focus(); $('#mq', el).select(); });
+    $('#mp', el).addEventListener('input', () => { mSel = null; });
+    const mAdd = () => { const p = mSel; if (!p) return toast('Select a product from the list', true); lines.push({ code: p.code, name: p.name, qty: num($('#mq', el).value) || 1, price: num($('#mpr', el).value) }); draw(); mSel = null; $('#mp', el).value = ''; $('#mq', el).value = ''; $('#mpr', el).value = ''; };
+    $('#madd', el).onclick = mAdd;
+    $('#mq', el).onkeydown = $('#mpr', el).onkeydown = e => { if (e.key === 'Enter') mAdd(); };
     $('#rl', el).onchange = e => { const i = e.target.dataset.i; if (i !== undefined) { const l = lines[i]; l.qty = Math.min(l.max || 1e9, Math.max(0, num(e.target.value))); setTimeout(draw, 0); } };
     $('#rl', el).onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { lines.splice(b.dataset.rm, 1); draw(); } };
     $('#proc', el).onclick = async () => {
@@ -723,7 +756,7 @@ VIEWS.grn = {
       <label class="f">Supplier invoice / ref<input id="ref"></label><label class="f">Paid now<input id="paid" inputmode="decimal" placeholder="0.00"></label><label class="f">Paid by<select id="pm"><option>cash</option><option>transfer</option><option>cheque</option><option>card</option></select></label></div>
       <div style="padding:0 16px 16px" class="row"><button class="btn" id="nsup">${ic('plus')}New supplier</button><button class="btn" id="pend">Pending <span class="tag" id="pc">0</span></button><span class="grow"></span><button class="btn d" id="rst">Reset</button><button class="btn p lg" id="proc">Process GRN</button></div></div>
     <div class="card"><h2>Add item</h2>
-      <div class="search">${ic('search')}<input id="pq" list="plist" placeholder="Code / name / barcode"></div><datalist id="plist">${S.products.map(p => `<option value="${esc(p.code)}">${esc(p.name)}</option>`).join('')}</datalist>
+      <div class="search">${ic('search')}<input id="pq" placeholder="Search product (code / name / barcode)"><div class="sugg panel" id="pqsugg"></div></div>
       <div id="pinfo" class="muted" style="margin:8px 0"></div>
       <div class="form"><label class="f">Quantity<input id="q" inputmode="decimal"></label><label class="f">Unit cost<input id="c" inputmode="decimal"></label>
       <label class="f">Total cost (optional)<input id="tc" inputmode="decimal"></label><label class="f">MRP<input id="mrp" inputmode="decimal"></label>
@@ -743,14 +776,15 @@ VIEWS.grn = {
       $('#pc', el).textContent = pendingGrns().length; save();
     };
     draw();
-    const pick = () => {
-      const v = $('#pq', el).value.trim(); sel = S.pmap[v] || S.products.find(p => p.barcode === v || p.name.toLowerCase() === v.toLowerCase());
+    const pick = (picked) => {
+      const v = $('#pq', el).value.trim(); sel = picked || S.pmap[v] || S.products.find(p => p.barcode === v || p.name.toLowerCase() === v.toLowerCase());
       if (!sel) { $('#pinfo', el).textContent = v ? 'Product not found — click "New product"' : ''; return; }
       $('#pinfo', el).innerHTML = `<b style="color:var(--ink)">${esc(sel.name)}</b> · stock ${qtyf(sel.stock)} · cost ${money(sel.cost)}`;
       $('#c', el).value = sel.cost || ''; $('#mrp', el).value = sel.mrp || ''; $('#ret', el).value = sel.retail || ''; $('#loy', el).value = sel.loyalty || ''; $('#wh', el).value = sel.wholesale || '';
       $('#q', el).focus();
     };
-    $('#pq', el).onchange = pick; $('#pq', el).onkeydown = e => { if (e.key === 'Enter') pick(); };
+    attachSuggest($('#pq', el), $('#pqsugg', el), p => pick(p), { price: p => p.cost, onMiss: v => { sel = null; $('#pinfo', el).textContent = v ? 'Product not found — click "New product"' : ''; } });
+    $('#pq', el).addEventListener('input', () => { sel = null; $('#pinfo', el).textContent = ''; });
     $('#tc', el).oninput = () => { const q = num($('#q', el).value); if (q) $('#c', el).value = r2(num($('#tc', el).value) / q); };
     $('#add', el).onclick = () => {
       if (!sel) return toast('Select a product', true);

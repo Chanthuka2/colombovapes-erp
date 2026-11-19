@@ -187,6 +187,8 @@ tfoot td{font-weight:700;background:rgba(255,255,255,.05)}
   .paybar{display:flex;align-items:center;gap:12px;position:fixed;left:10px;right:10px;bottom:84px;z-index:41;padding:10px 12px 10px 18px;border-radius:22px}
   .paybar b{display:block;font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
   .paybar .btn{padding:12px 20px}
+  .row > .search.grow{flex:1 1 100%!important}
+  .sugg{max-height:50vh}
   .line{grid-template-columns:auto 1fr auto;row-gap:8px}
   .line .n{grid-column:1/-1}
   .line input[data-p]{width:100%!important}

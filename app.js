@@ -522,8 +522,70 @@ function payModal(done) {
         if (await commit(ops, `Invoice ${inv.no} saved`)) {
           if (f.print) { localStorage.removeItem('cv_noprint'); printReceipt(inv); } else localStorage.setItem('cv_noprint', '1');
           close(); done();
+          orderMsgModal({ ...inv, id });
         } else $('#go', m).disabled = false;
       };
+    }
+  });
+}
+
+// ---------------------------------------------------------------- order message (copy & paste)
+const plainNum = n => { n = r2(n); return Number.isInteger(n) ? String(n) : n.toFixed(2); };
+function buildOrderMsg(no, d, total) {
+  return [`#${no}`, '', d.name, d.address, d.phone, '', `Total ${plainNum(total)}`]
+    .map(x => (x ?? '').toString().trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (x) {} ta.remove(); return ok;
+  }
+}
+function orderMsgModal(inv) {
+  const c = S.cmap[inv.customerId] || {};
+  const d = inv.delivery || { name: c.name || '', address: c.address || '', phone: c.phone || '' };
+  modal(`Order message — ${esc(inv.no)}`, `
+    <div class="form">
+      <label class="f full">Customer name<input name="name" value="${esc(d.name)}" placeholder="Mathesha"></label>
+      <label class="f full">Address<textarea name="address" rows="3" placeholder="No.37/A 4th canal&#10;Polonnaruwa">${esc(d.address)}</textarea></label>
+      <label class="f full">Contact number<input name="phone" value="${esc(d.phone)}" inputmode="tel" placeholder="0704919654"></label>
+    </div>
+    <h3 style="margin-top:14px">Message</h3>
+    <textarea id="om" rows="9" style="font-family:var(--mono);font-size:14px"></textarea>
+    ${!inv.customerId ? '<label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="savec"> Save as a new customer</label>' : ''}
+    <div class="acts"><a class="btn" id="wa" target="_blank" rel="noopener">WhatsApp</a><button class="btn" data-x2>Close</button><button class="btn p lg" id="cp">Copy</button></div>`, {
+    onMount(m, close) {
+      const om = $('#om', m);
+      let edited = false;
+      const upd = () => {
+        if (!edited) om.value = buildOrderMsg(inv.no, formData($('.form', m)), inv.total);
+        const ph = formData($('.form', m)).phone.replace(/\D/g, '');
+        const wa = ph.length >= 9 ? '94' + ph.replace(/^0+/, '').slice(-9) : '';
+        $('#wa', m).href = `https://wa.me/${wa}?text=${encodeURIComponent(om.value)}`;
+      };
+      $('.form', m).addEventListener('input', upd);
+      om.addEventListener('input', () => { edited = true; upd(); });
+      upd();
+      $('[data-x2]', m).onclick = close;
+      const save = async () => {
+        const f = formData($('.form', m));
+        const ops = [{ op: 'update', col: 'invoices', id: inv.id, data: { delivery: f } }];
+        const sc = $('#savec', m);
+        if (sc && sc.checked && f.name.trim()) {
+          const cid = S.db.newId('customers');
+          ops.push({ op: 'set', col: 'customers', id: cid, data: { name: f.name.trim(), phone: f.phone.trim(), address: f.address, type: 'Individual', priceType: 'retail', balance: 0, active: true, ts: Date.now() } });
+          ops.push({ op: 'update', col: 'invoices', id: inv.id, data: { customerId: cid, customerName: f.name.trim() } });
+        }
+        await commit(ops);
+      };
+      $('#cp', m).onclick = async () => {
+        const ok = await copyText(om.value);
+        toast(ok ? 'Message copied ✓' : 'Could not copy — select the text and copy it manually', !ok);
+        if (ok) { save(); $('#cp', m).textContent = 'Copied ✓'; }
+      };
+      $('#wa', m).addEventListener('click', save);
+      setTimeout(() => { const n = $('[name=name]', m); if (!n.value) n.focus(); }, 60);
     }
   });
 }
@@ -546,10 +608,11 @@ function invoiceModal(inv, id) {
    ${tableHTML([{ k: 'name', t: 'Item' }, { k: 'qty', t: 'Qty', num: 1 }, { k: 'price', t: 'Price', money: 1 }, { k: 'amt', t: 'Amount', money: 1 }], inv.items.map(l => ({ ...l, amt: l.qty * l.price - num(l.disc) })), { amt: inv.total })}
    <br><div class="row">${Object.entries(inv.pay || {}).filter(([, v]) => v).map(([k, v]) => `<span class="tag">${k}: ${money(v)}</span>`).join('')}${inv.discount ? `<span class="tag a">Disc ${money(inv.discount)}</span>` : ''}${inv.returned ? `<span class="tag r">Returned ${money(inv.returned)}</span>` : ''}</div>
    ${inv.imported ? '<div class="muted" style="margin-top:10px">Bill imported from the old ERP — no item details.</div>' : ''}
-   <div class="acts">${isAdmin() && inv.status !== 'void' && !inv.imported ? `<button class="btn d" id="void">${ic('trash')}Delete bill</button>` : ''}<button class="btn p" id="rp">${ic('print')}Print</button></div>`, {
+   <div class="acts">${isAdmin() && inv.status !== 'void' && !inv.imported ? `<button class="btn d" id="void">${ic('trash')}Delete bill</button>` : ''}<button class="btn" id="msg">${ic('edit')}Message</button><button class="btn p" id="rp">${ic('print')}Print</button></div>`, {
     wide: true,
     onMount(m, close) {
       $('#rp', m).onclick = () => printReceipt(inv);
+      $('#msg', m).onclick = () => { close(); orderMsgModal({ ...inv, id }); };
       const v = $('#void', m);
       if (v) v.onclick = async () => { if (await deleteInvoice({ ...inv, id })) close(); };
     }
@@ -973,7 +1036,7 @@ function customerModal(c, done) {
   const isNew = !c; c = c || { type: 'Individual', priceType: 'retail' };
   modal(isNew ? 'New customer' : 'Edit customer', `<div class="form">
     <label class="f full">Name<input name="name" value="${esc(c.name || '')}"></label><label class="f">Telephone<input name="phone" value="${esc(c.phone || '')}" inputmode="tel"></label><label class="f">NIC / BR<input name="nic" value="${esc(c.nic || '')}"></label>
-    <label class="f full">Address<input name="address" value="${esc(c.address || '')}"></label>
+    <label class="f full">Address<textarea name="address" rows="3" placeholder="No.37/A 4th canal&#10;Polonnaruwa">${esc(c.address || '')}</textarea></label>
     <label class="f">Type<select name="type">${['Individual', 'Company'].map(x => opt(x, x, c.type)).join('')}</select></label><label class="f">Price type<select name="priceType">${[['retail', 'Retail'], ['wholesale', 'Wholesale'], ['loyalty', 'Loyalty']].map(([k, t]) => opt(k, t, c.priceType)).join('')}</select></label>
     <label class="f">Credit limit<input name="creditLimit" value="${c.creditLimit || ''}" inputmode="decimal"></label><label class="f">Pay date<input name="payDate" type="date" value="${esc(c.payDate || '')}"></label>
     ${isNew ? `<label class="f">Opening balance (receivable)<input name="balance" inputmode="decimal" placeholder="0.00"></label>` : ''}

@@ -16,9 +16,32 @@ function track(p) {
   p.catch(e => console.error('write failed', e)).finally(() => { pending--; emitSync(); });
 }
 
+// ---- businesses: each business keeps its own collections ("wh__products" etc).
+// The main business uses the plain names, so existing Colombo Vapes data is untouched.
+// Logins (employees) and the business list are shared by all businesses.
+const SHARED = new Set(['employees', 'businesses']);
+let BIZ = 'main';
+export const setBusiness = id => { BIZ = id || 'main'; };
+export const getBusiness = () => BIZ;
+const P = col => (BIZ === 'main' || SHARED.has(col)) ? col : `${BIZ}__${col}`;
+
 export async function createDB() {
   const useFirebase = !!(CONFIG.firebase && CONFIG.firebase.apiKey);
-  return useFirebase ? firebaseDB() : localDB();
+  const raw = await (useFirebase ? firebaseDB() : localDB());
+  const mapOps = ops => ops.map(o => ({ ...o, col: P(o.col) }));
+  return {
+    ...raw,
+    watch: (col, cb, opts) => raw.watch(P(col), cb, opts),
+    get: (col, id) => raw.get(P(col), id),
+    all: col => raw.all(P(col)),
+    range: (col, ...a) => raw.range(P(col), ...a),
+    where: (col, ...a) => raw.where(P(col), ...a),
+    newId: col => raw.newId(P(col)),
+    commit: ops => raw.commit(mapOps(ops)),
+    commitWait: ops => raw.commitWait(mapOps(ops)),
+    // read another business's data directly (used for importing)
+    rawCol: P
+  };
 }
 
 // ------------------------------------------------------------------ Firebase

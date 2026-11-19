@@ -4,8 +4,8 @@
 //  to Firebase automatically when the internet comes back.
 // =====================================================================
 import { CONFIG } from './config.js';
-import { createDB, INC } from './db.js';
-import { SEED } from './seed.js';
+import { createDB, INC, setBusiness } from './db.js';
+import { SEED, WSEED } from './seed.js';
 
 // ---------------------------------------------------------------- utils
 const $ = (s, el = document) => el.querySelector(s);
@@ -61,15 +61,19 @@ const ic = (n, s = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 const S = {
   db: null, user: null, me: null,
   products: [], pmap: {}, customers: [], cmap: {}, suppliers: [], smap: {}, employees: [],
-  meta: {}, recent: [], sync: { pending: 0, online: navigator.onLine },
+  meta: {}, recent: [], businesses: [], biz: localStorage.getItem('cv_biz') || 'main', sync: { pending: 0, online: navigator.onLine },
   cart: [], priceType: 'retail', customerId: '', invDisc: 0
 };
 const isAdmin = () => S.me?.role === 'admin';
-const shop = () => ({ ...CONFIG.shop, ...(S.meta.shop || {}) });
+const shop = () => ({ ...CONFIG.shop, ...(S.biz !== 'main' ? { name: curBiz().name } : {}), ...(S.meta.shop || {}) });
 const cats = () => S.meta.categories || SEED.categories;
 const expCats = () => S.meta.expenseCategories || SEED.expenseCategories;
-const device = () => { try { return JSON.parse(localStorage.getItem('cv_device') || '{}'); } catch (e) { return {}; } };
-const setDevice = d => localStorage.setItem('cv_device', JSON.stringify({ ...device(), ...d }));
+// local keys are kept per business (held bills, GRN drafts, invoice counter…)
+const LK = k => S.biz === 'main' ? k : `${k}__${S.biz}`;
+const device = () => { try { return JSON.parse(localStorage.getItem(LK('cv_device')) || '{}'); } catch (e) { return {}; } };
+const setDevice = d => localStorage.setItem(LK('cv_device'), JSON.stringify({ ...device(), ...d }));
+const bizList = () => S.businesses.length ? S.businesses : [{ id: 'main', name: CONFIG.shop.name, prefix: 'A' }];
+const curBiz = () => bizList().find(b => b.id === S.biz) || bizList()[0];
 
 // ---------------------------------------------------------------- UI helpers
 function toast(msg, err) {
@@ -147,7 +151,9 @@ function startWatchers() {
   unsubs.forEach(f => f && f()); unsubs = [];
   // cached profile + settings let the app open instantly; live data replaces them a moment later
   const cache = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
-  const cMe = cache('cv_me_' + S.user.username), cMeta = cache('cv_meta');
+  setBusiness(S.biz);
+  const cMe = cache('cv_me_' + S.user.username), cMeta = cache(LK('cv_meta')), cBiz = cache('cv_biz_list');
+  if (cBiz) S.businesses = cBiz;
   if (cMe) { S.me = cMe; S.employees = S.employees.length ? S.employees : [cMe]; }
   if (cMeta) S.meta = cMeta;
   let ready = { emp: !!cMe, meta: !!cMe };
@@ -163,7 +169,19 @@ function startWatchers() {
     if (S._started && S.me && S.me.active === false) { S.db.logout(); return; }
     ready.emp = true; go();
   }, { meta: true }));
-  unsubs.push(S.db.watch('meta', (list, m = {}) => { S.meta = list.find(d => d.id === 'settings') || S.meta || {}; if (!m.error) try { localStorage.setItem('cv_meta', JSON.stringify(S.meta)); } catch (e) {} ready.meta = true; go(); if (S._started && !m.error) rerenderSoft(); }));
+  unsubs.push(S.db.watch('businesses', (list, m = {}) => {
+    if (m.error) return;
+    S.businesses = list.sort((a, b) => (a.id === 'main' ? -1 : b.id === 'main' ? 1 : (a.ts || 0) - (b.ts || 0)));
+    try { localStorage.setItem('cv_biz_list', JSON.stringify(S.businesses)); } catch (e) {}
+    if (S._started) { if (!bizList().some(b => b.id === S.biz)) switchBusiness('main'); else { renderShell(); route(); } }
+  }));
+  startBizWatchers(ready, go);
+}
+let bizUnsubs = [];
+function startBizWatchers(ready, go) {
+  bizUnsubs.forEach(f => f && f()); bizUnsubs = [];
+  unsubs.push = f => bizUnsubs.push(f); // business-scoped listeners below
+  unsubs.push(S.db.watch('meta', (list, m = {}) => { S.meta = list.find(d => d.id === 'settings') || S.meta || {}; if (!m.error) try { localStorage.setItem(LK('cv_meta'), JSON.stringify(S.meta)); } catch (e) {} if (ready) { ready.meta = true; go(); } if (S._started && !m.error) rerenderSoft(); }));
   unsubs.push(S.db.watch('products', list => {
     S.products = list.map(p => ({ ...p, code: p.code || p.id })).sort(by('name'));
     S.pmap = Object.fromEntries(S.products.map(p => [p.code, p]));
@@ -173,6 +191,24 @@ function startWatchers() {
   unsubs.push(S.db.watch('suppliers', list => { S.suppliers = list.sort(by('name')); S.smap = Object.fromEntries(list.map(c => [c.id, c])); rerenderSoft('suppliers'); }));
   const since = dStart(addDays(today(), -40));
   unsubs.push(S.db.watch('invoices', list => { S.recent = list.sort(by('ts', true)); rerenderSoft('invoices'); }, { since }));
+  delete unsubs.push;
+}
+function switchBusiness(id) {
+  if (id === S.biz) return;
+  S.biz = id; localStorage.setItem('cv_biz', id); setBusiness(id);
+  Object.assign(S, { products: [], pmap: {}, customers: [], cmap: {}, suppliers: [], smap: {}, recent: [], cart: [], invDisc: '', customerId: '', priceType: 'retail' });
+  try { S.meta = JSON.parse(localStorage.getItem(LK('cv_meta')) || '{}'); } catch (e) { S.meta = {}; }
+  if (!device().code) setDevice({ code: curBiz().prefix || 'A' });
+  startBizWatchers(null, () => {});
+  renderShell(); route();
+  toast('Switched to ' + curBiz().name);
+}
+function bizPicker() {
+  const list = bizList();
+  modal('Switch business', `<div class="grid" style="gap:10px">${list.map(b => `<button class="btn ${b.id === S.biz ? 'p' : ''} lg" data-b="${esc(b.id)}" style="justify-content:flex-start">${ic(b.id === 'main' ? 'pos' : 'stock')}${esc(b.name)}${b.id === S.biz ? ' ✓' : ''}</button>`).join('')}</div>
+    ${isAdmin() ? `<div class="acts" style="justify-content:flex-start"><a class="btn sm" href="#/settings">Manage businesses</a></div>` : ''}`, {
+    onMount(m, close) { m.onclick = e => { const b = e.target.closest('[data-b]'); if (b) { close(); switchBusiness(b.dataset.b); } }; }
+  });
 }
 
 async function afterLogin() {
@@ -186,7 +222,7 @@ async function afterLogin() {
   }
   if (!S.me) { root.innerHTML = `<div class="login"><div class="card">This user has no employee account. Please contact the admin.<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
   if (S.me.active === false) { await S.db.logout(); toast('This account has been deactivated', true); return; }
-  if (!device().code) setDevice({ code: 'A' });
+  if (!device().code) setDevice({ code: curBiz().prefix || 'A' });
   renderShell();
   window.addEventListener('hashchange', () => { $$('.modal-bg').forEach(m => m.remove()); route(); }); // never leave a popup over a new page
   route();
@@ -221,14 +257,16 @@ const NAV = [
 function renderShell() {
   const items = NAV.filter(n => n[0] === 'sep' || !n[2] || isAdmin());
   root.innerHTML = `<div id="app">
-    <aside class="side panel"><div class="brand"><div class="logo">CV</div><div><b>${esc(shop().name)}</b><small>ERP</small></div></div>
+    <aside class="side panel"><button class="brand bizsw" id="bizsw" title="Switch business"><div class="logo">${S.biz === 'main' ? 'CV' : 'WH'}</div><div class="grow" style="text-align:left"><b>${esc(curBiz().name)}</b><small>${bizList().length > 1 ? 'Tap to switch ⇄' : 'ERP'}</small></div></button>
       <nav class="nav">${items.map(n => n[0] === 'sep' ? '<div class="sep"></div>' : `<a href="#/${n[0]}" data-r="${n[0]}">${ic(n[0])}${n[1]}</a>`).join('')}</nav>
       <div class="me"><div class="row">${ic('user', 'width="18"')}<div class="grow"><b style="color:var(--ink)">${esc(S.me.name)}</b><br>${esc(S.me.role)} · Device ${esc(device().code)}</div><button class="btn sm" id="lo" title="Logout">${ic('logout')}</button></div></div>
     </aside>
-    <header class="top"><h1 id="title"></h1><span class="pill" id="sync"></span></header>
+    <header class="top"><h1 id="title"></h1>${bizList().length > 1 ? `<button class="pill bizpill" id="bizsw2">${ic(S.biz === 'main' ? 'pos' : 'stock', 'width="15"')}${esc(curBiz().name)} ⇄</button>` : ''}<span class="pill" id="sync"></span></header>
     <main id="main"></main>
     <nav class="tabbar panel">${[['dashboard', 'Home'], ['pos', 'POS'], ['stock', 'Stock'], ['customers', 'Customers']].map(([r, t]) => `<a href="#/${r}" data-r="${r}">${ic(r)}${t}</a>`).join('')}<a href="javascript:void 0" id="more">${ic('more')}More</a></nav>
   </div>`;
+  document.body.dataset.biz = S.biz === 'main' ? '' : 'alt';
+  $('#bizsw').onclick = bizPicker; const b2 = $('#bizsw2'); if (b2) b2.onclick = bizPicker;
   $('#lo').onclick = async () => { if (await confirmBox('Log out now?')) { S._started = false; await S.db.logout(); location.hash = ''; } };
   $('#more').onclick = () => modal('Menu', `<div class="tiles">${items.filter(n => n[0] !== 'sep').map(n => `<a class="tile panel" href="#/${n[0]}"><span class="ic">${ic(n[0])}</span>${n[1]}</a>`).join('')}<a class="tile panel" id="lo2"><span class="ic">${ic('logout')}</span>Logout</a></div>`, {
     onMount(m, c) { $$('a[href]', m).forEach(a => a.addEventListener('click', c)); $('#lo2', m).onclick = async () => { c(); S._started = false; await S.db.logout(); }; }
@@ -283,7 +321,7 @@ VIEWS.dashboard = {
     const monthInv = inv.filter(i => i.day.slice(0, 7) === t.slice(0, 7));
     const tiles = [['pos', 'Invoice', 'F2', 'rgba(141,198,63,.4)'], ['returns', 'Return', '', 'rgba(255,181,71,.35)'], ['stock', 'Stock', '', 'rgba(70,214,255,.35)'], ['grn', 'GRN', '', 'rgba(155,123,255,.4)', 1], ['verify', 'Stock Verify', '', 'rgba(70,214,255,.35)', 1], ['products', 'Products', '', 'rgba(141,198,63,.35)', 1], ['customers', 'Customers', '', 'rgba(255,181,71,.35)'], ['suppliers', 'Suppliers', supOut ? 'Rs ' + money(supOut) : '', 'rgba(255,93,108,.35)', 1], ['employees', 'Employees', '', 'rgba(155,123,255,.4)', 1], ['cash', 'Cash In/Out', '', 'rgba(141,198,63,.35)', 1], ['reports', 'Reports', '', 'rgba(70,214,255,.35)', 1], ['settings', 'Settings', '', 'rgba(255,255,255,.25)', 1]]
       .filter(x => !x[4] || isAdmin());
-    return `${!S.products.length && isAdmin() ? `<div class="card" style="margin-bottom:14px;border-color:rgba(184,240,90,.5)"><div class="row"><div class="grow"><b>Import data from the old ERP</b><div class="muted">Products 71, stock, suppliers, expense categories.</div></div><button class="btn p" id="imp">${ic('upload')}Import now</button></div></div>` : ''}
+    return `${!S.products.length && isAdmin() ? `<div class="card" style="margin-bottom:14px;border-color:rgba(184,240,90,.5)"><div class="row"><div class="grow"><b>Import data from the ${seedLabel()}</b><div class="muted">Products ${seedFor().products.length}, stock, suppliers, expense categories.</div></div><button class="btn p" id="imp">${ic('upload')}Import now</button></div></div>` : ''}
     <div class="grid g4">
       <div class="stat card"><div class="k">Today sales</div><div class="v">${money(sales)}</div><div class="s">${tInv.length} invoices</div></div>
       ${isAdmin() ? `<div class="stat card"><div class="k">Today profit</div><div class="v good">${money(profit)}</div><div class="s">Month: ${money(sum(monthInv, 'profit'))}${monthInv.some(i => i.imported) ? ' (new bills)' : ''}</div></div>` : `<div class="stat card"><div class="k">Cash sales</div><div class="v">${money(cash)}</div><div class="s">today</div></div>`}
@@ -303,16 +341,20 @@ VIEWS.dashboard = {
   mount(el) { const b = $('#imp', el); if (b) b.onclick = importSeed; }
 };
 
+const seedFor = () => S.biz === 'main' ? SEED : WSEED;
+const seedLabel = () => S.biz === 'main' ? 'old Colombo Vapes ERP' : 'old VAPEMASTER system';
 async function importSeed() {
-  if (!(await confirmBox('Import 71 products, stock, 3 suppliers and expense categories from the old ERP?', 'Import'))) return;
+  const D = seedFor();
+  if (S.products.length && !(await confirmBox(`This business already has ${S.products.length} products. Products with the same code will be overwritten. Continue?`, 'Continue'))) return;
+  if (!(await confirmBox(`Import ${D.products.length} products, stock, ${D.suppliers.length} suppliers and expense categories from the ${seedLabel()} into "${curBiz().name}"?`, 'Import'))) return;
   const ops = [];
-  for (const p of SEED.products) {
+  for (const p of D.products) {
     ops.push({ op: 'set', col: 'products', id: p.code, data: { ...p, ts: Date.now() } });
-    if (p.stock) ops.push({ op: 'set', col: 'stockMoves', id: S.db.newId('stockMoves'), data: { ts: Date.now(), day: today(), code: p.code, name: p.name, qty: p.stock, type: 'opening', ref: 'Old ERP', before: 0, by: S.me.username } });
+    if (p.stock) ops.push({ op: 'set', col: 'stockMoves', id: S.db.newId('stockMoves'), data: { ts: Date.now(), day: today(), code: p.code, name: p.name, qty: p.stock, type: 'opening', ref: 'Old system', before: 0, by: S.me.username } });
   }
-  for (const s of SEED.suppliers) ops.push({ op: 'set', col: 'suppliers', id: S.db.newId('suppliers'), data: { ...s, ts: Date.now() } });
-  ops.push({ op: 'set', col: 'meta', id: 'settings', merge: true, data: { categories: SEED.categories, expenseCategories: SEED.expenseCategories, imported: Date.now() } });
-  setDevice({ code: device().code || 'A', seq: Math.max(device().seq || 0, SEED.nextInvoiceNo - 1) });
+  for (const s of D.suppliers) ops.push({ op: 'set', col: 'suppliers', id: S.db.newId('suppliers'), data: { ...s, ts: Date.now() } });
+  ops.push({ op: 'set', col: 'meta', id: 'settings', merge: true, data: { categories: D.categories, expenseCategories: D.expenseCategories, imported: Date.now() } });
+  if (S.biz === 'main') setDevice({ code: device().code || 'A', seq: Math.max(device().seq || 0, D.nextInvoiceNo - 1) });
   for (let i = 0; i < ops.length; i += 400) await commit(ops.slice(i, i + 400));
   toast('Import complete ✓');
 }
@@ -450,7 +492,7 @@ VIEWS.pos = {
     $('#hold', el).onclick = () => {
       if (!S.cart.length) return;
       const h = held(); h.push({ ts: Date.now(), cart: S.cart, customerId: S.customerId, priceType: S.priceType, disc: S.invDisc, total: cartTotals().total });
-      localStorage.setItem('cv_held', JSON.stringify(h)); S.cart = []; S.invDisc = ''; drawCart(); toast('Bill put on hold');
+      localStorage.setItem(LK('cv_held'), JSON.stringify(h)); S.cart = []; S.invDisc = ''; drawCart(); toast('Bill put on hold');
     };
     $('#recall', el).onclick = () => {
       const h = held(); if (!h.length) return toast('No bills on hold');
@@ -458,8 +500,8 @@ VIEWS.pos = {
         onMount(m, close) {
           m.onclick = e => {
             const o = e.target.closest('[data-i]'), d = e.target.closest('[data-del]');
-            if (o) { const b = h.splice(o.dataset.i, 1)[0]; S.cart = b.cart; S.customerId = b.customerId; S.priceType = b.priceType; S.invDisc = b.disc; localStorage.setItem('cv_held', JSON.stringify(h)); close(); route(); }
-            if (d) { h.splice(d.dataset.del, 1); localStorage.setItem('cv_held', JSON.stringify(h)); close(); drawCart(); }
+            if (o) { const b = h.splice(o.dataset.i, 1)[0]; S.cart = b.cart; S.customerId = b.customerId; S.priceType = b.priceType; S.invDisc = b.disc; localStorage.setItem(LK('cv_held'), JSON.stringify(h)); close(); route(); }
+            if (d) { h.splice(d.dataset.del, 1); localStorage.setItem(LK('cv_held'), JSON.stringify(h)); close(); drawCart(); }
           };
         }
       });
@@ -470,7 +512,7 @@ VIEWS.pos = {
     if (window.innerWidth >= 900) setTimeout(() => q.focus(), 50);
   }
 };
-const held = () => { try { return JSON.parse(localStorage.getItem('cv_held') || '[]'); } catch (e) { return []; } };
+const held = () => { try { return JSON.parse(localStorage.getItem(LK('cv_held')) || '[]'); } catch (e) { return []; } };
 document.addEventListener('keydown', e => {
   if (!S._started) return;
   if (e.key === 'F2') { e.preventDefault(); if (cur.name !== 'pos') location.hash = '#/pos'; else $('#q')?.focus(); }
@@ -532,7 +574,7 @@ function payModal(done) {
 // ---------------------------------------------------------------- order message (copy & paste)
 const plainNum = n => { n = r2(n); return Number.isInteger(n) ? String(n) : n.toFixed(2); };
 function buildOrderMsg(no, d, total) {
-  return [`#${no}`, '', d.name, d.address, d.phone, '', `Total ${plainNum(total)}`]
+  return [`${S.biz === 'main' ? '#' : '@'}${no}`, '', d.name, d.address, d.phone, '', `Total ${plainNum(total)}`]
     .map(x => (x ?? '').toString().trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 async function copyText(t) {
@@ -828,8 +870,8 @@ VIEWS.grn = {
       <div class="row" style="margin-top:14px"><button class="btn" id="np">${ic('plus')}New product</button><span class="grow"></span><button class="btn p" id="add">Add to table</button></div></div>
   </div>`,
   mount(el) {
-    const save = () => localStorage.setItem('cv_grn', JSON.stringify(g));
-    let g; try { g = JSON.parse(localStorage.getItem('cv_grn') || 'null'); } catch (e) {} g = g || { lines: [], sup: '', ref: '' };
+    const save = () => localStorage.setItem(LK('cv_grn'), JSON.stringify(g));
+    let g; try { g = JSON.parse(localStorage.getItem(LK('cv_grn')) || 'null'); } catch (e) {} g = g || { lines: [], sup: '', ref: '' };
     $('#sup', el).value = g.sup; $('#ref', el).value = g.ref;
     let sel = null;
     const draw = () => {
@@ -866,8 +908,8 @@ VIEWS.grn = {
       if (!g.lines.length && !p.length) return toast('No pending GRNs');
       modal('Pending GRNs', `${g.lines.length ? `<button class="btn" id="park">Park the current GRN</button><br><br>` : ''}${p.map((x, i) => `<div class="row" style="padding:6px 0"><span class="grow">${fmtDT(x.ts)} · ${esc(S.smap[x.sup]?.name || '-')} · ${x.lines.length} items</span><button class="btn sm p" data-o="${i}">Open</button><button class="btn sm d" data-d="${i}">${ic('trash')}</button></div>`).join('')}`, {
         onMount(m, close) {
-          const pk = $('#park', m); if (pk) pk.onclick = () => { p.push({ ...g, ts: Date.now() }); localStorage.setItem('cv_grn_p', JSON.stringify(p)); g = { lines: [], sup: '', ref: '' }; save(); close(); route(); };
-          m.onclick = e => { const o = e.target.closest('[data-o]'), d = e.target.closest('[data-d]'); if (o) { g = p.splice(o.dataset.o, 1)[0]; localStorage.setItem('cv_grn_p', JSON.stringify(p)); save(); close(); route(); } if (d) { p.splice(d.dataset.d, 1); localStorage.setItem('cv_grn_p', JSON.stringify(p)); close(); draw(); } };
+          const pk = $('#park', m); if (pk) pk.onclick = () => { p.push({ ...g, ts: Date.now() }); localStorage.setItem(LK('cv_grn_p'), JSON.stringify(p)); g = { lines: [], sup: '', ref: '' }; save(); close(); route(); };
+          m.onclick = e => { const o = e.target.closest('[data-o]'), d = e.target.closest('[data-d]'); if (o) { g = p.splice(o.dataset.o, 1)[0]; localStorage.setItem(LK('cv_grn_p'), JSON.stringify(p)); save(); close(); route(); } if (d) { p.splice(d.dataset.d, 1); localStorage.setItem(LK('cv_grn_p'), JSON.stringify(p)); close(); draw(); } };
         }
       });
     };
@@ -899,7 +941,7 @@ VIEWS.grn = {
     };
   }
 };
-const pendingGrns = () => { try { return JSON.parse(localStorage.getItem('cv_grn_p') || '[]'); } catch (e) { return []; } };
+const pendingGrns = () => { try { return JSON.parse(localStorage.getItem(LK('cv_grn_p')) || '[]'); } catch (e) { return []; } };
 
 // ================================================================ VERIFY
 VIEWS.verify = {
@@ -1356,13 +1398,30 @@ VIEWS.settings = {
       <label class="f full">Shop name<input name="name" value="${esc(s.name)}"></label><label class="f">Phone<input name="phone" value="${esc(s.phone)}"></label><label class="f">Address<input name="address" value="${esc(s.address)}"></label>
       <label class="f full">Receipt footer<input name="receiptFooter" value="${esc(s.receiptFooter)}"></label></div><div class="acts"><button class="btn p" id="ss">Save</button></div></div>
     <div class="card"><h2>This device</h2><p class="muted">Give each device its own invoice prefix (A, B, C…) so two devices never create the same invoice number while offline.</p><div class="form"><label class="f">Device code<input id="dc" value="${esc(d.code || 'A')}" maxlength="2"></label><label class="f">Last invoice no<input id="ds" value="${d.seq || 0}" inputmode="numeric"></label></div><div class="acts"><button class="btn p" id="sd">Save</button></div></div>
-    <div class="card"><h2>Data</h2><p class="muted">Mode: <b>${S.db.mode === 'firebase' ? 'Firebase (online sync)' : 'Demo (this device only)'}</b></p><div class="row"><button class="btn" id="bk">${ic('download')}Backup (JSON)</button><label class="btn">${ic('upload')}Restore<input type="file" id="rs" accept=".json" hidden></label><button class="btn" id="imp">Old ERP data import</button></div></div>
+    <div class="card"><h2>Data</h2><p class="muted">Mode: <b>${S.db.mode === 'firebase' ? 'Firebase (online sync)' : 'Demo (this device only)'}</b></p><div class="row"><button class="btn" id="bk">${ic('download')}Backup (JSON)</button><label class="btn">${ic('upload')}Restore<input type="file" id="rs" accept=".json" hidden></label><button class="btn" id="imp">Import from ${S.biz === 'main' ? 'old ERP' : 'VAPEMASTER'}</button></div></div>
+    <div class="card"><h2>Businesses</h2><p class="muted">Each business has its own products, stock, bills, customers, suppliers, expenses and reports. Logins are shared.</p>
+      <div id="bzl">${bizList().map(b => `<div class="row" style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06)"><b class="grow">${esc(b.name)}${b.id === S.biz ? ' <span class="tag g">current</span>' : ''}</b><span class="tag">Bills ${esc(b.prefix || '')}…</span><button class="btn sm" data-rn="${esc(b.id)}">${ic('edit')}</button></div>`).join('')}</div>
+      <div class="acts" style="justify-content:flex-start"><button class="btn" id="addbiz">${ic('plus')}Add business</button></div></div>
     <div class="card"><h2>App</h2><p class="muted">Version 1.0 · Offline ready ${'serviceWorker' in navigator ? '✓' : '✗'}</p><div class="row"><button class="btn" id="upd">Update check</button></div></div></div>`;
   },
   mount(el) {
     $('#ss', el).onclick = () => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { shop: formData($('#sf', el)) } }], 'Saved');
     $('#sd', el).onclick = () => { setDevice({ code: $('#dc', el).value.trim().toUpperCase() || 'A', seq: num($('#ds', el).value) }); toast('Saved'); renderShell(); route(); };
     $('#imp', el).onclick = importSeed;
+    const bizForm = (b, done) => modal(b ? 'Edit business' : 'Add business', `<div class="form"><label class="f full">Name (shown on bills)<input name="name" value="${esc(b?.name || '')}" placeholder="Colombo Vapes Warehouse"></label><label class="f">Bill number prefix<input name="prefix" maxlength="2" value="${esc(b?.prefix || '')}" placeholder="W"></label></div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
+      onMount(m, close) { $('#sv', m).onclick = async () => {
+        const f = formData(m); f.name = f.name.trim(); f.prefix = f.prefix.trim().toUpperCase();
+        if (!f.name || !f.prefix) return toast('Name and prefix are required', true);
+        if (bizList().some(x => x.prefix === f.prefix && x.id !== b?.id)) return toast('Another business already uses this prefix', true);
+        const ops = [];
+        if (!S.businesses.some(x => x.id === 'main')) ops.push({ op: 'set', col: 'businesses', id: 'main', data: { name: CONFIG.shop.name, prefix: device().code || 'A', ts: 1 } });
+        const id = b?.id || ('b' + Date.now().toString(36));
+        ops.push({ op: b ? 'update' : 'set', col: 'businesses', id, data: { name: f.name, prefix: f.prefix, ts: b?.ts || Date.now() } });
+        if (await commit(ops, 'Saved')) { close(); done && done(id); }
+      }; }
+    });
+    $('#addbiz', el).onclick = () => bizForm(null, id => setTimeout(() => confirmBox('Business added. Switch to it now?', 'Switch').then(y => y && switchBusiness(id)), 300));
+    $('#bzl', el).onclick = e => { const b = e.target.closest('[data-rn]'); if (b) bizForm(bizList().find(x => x.id === b.dataset.rn)); };
     $('#upd', el).onclick = async () => { const r = await navigator.serviceWorker?.getRegistration(); await r?.update(); toast('If a new version is available it will load after reload'); setTimeout(() => location.reload(), 900); };
     $('#bk', el).onclick = async () => {
       const cols = ['products', 'customers', 'suppliers', 'employees', 'invoices', 'returns', 'grns', 'payments', 'expenses', 'adjustments', 'stockMoves', 'attendance', 'meta'];

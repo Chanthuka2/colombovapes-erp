@@ -112,7 +112,7 @@ function printHTML(html, cls = 'rep') {
   setTimeout(() => window.print(), 60);
 }
 function tableHTML(cols, rows, foot) {
-  if (!rows.length) return '<div class="empty">Data naha</div>';
+  if (!rows.length) return '<div class="empty">No data</div>';
   const cell = (c, r) => { const v = r[c.k]; return `<td class="${c.num || c.money ? 'num' : ''}">${c.html ? c.html(r) : c.money ? money(v) : c.num ? qtyf(v) : esc(v)}</td>`; };
   return `<table><thead><tr>${cols.map(c => `<th class="${c.num || c.money ? 'num' : ''}">${esc(c.t)}</th>`).join('')}</tr></thead>
   <tbody>${rows.map(r => `<tr>${cols.map(c => cell(c, r)).join('')}</tr>`).join('')}</tbody>
@@ -123,8 +123,8 @@ function printTable(title, sub, cols, rows, foot) {
   printHTML(`<div class="rep"><h1>${esc(s.name)} — ${esc(title)}</h1><div>${esc(sub || '')}</div><br>${tableHTML(cols.map(c => ({ ...c, html: null })), rows, foot)}<p style="font-size:10px">Printed ${fmtDT(Date.now())}</p></div>`);
 }
 async function commit(ops, okMsg) {
-  try { await S.db.commit(ops); okMsg && toast(okMsg + (S.sync.online ? '' : ' (offline — sync wenawa)')); return true; }
-  catch (e) { console.error(e); toast('Save karanna bari una: ' + e.message, true); return false; }
+  try { await S.db.commit(ops); okMsg && toast(okMsg + (S.sync.online ? '' : ' (offline — will sync)')); return true; }
+  catch (e) { console.error(e); toast('Could not save: ' + e.message, true); return false; }
 }
 const move = (p, qty, type, ref) => ({ op: 'set', col: 'stockMoves', id: S.db.newId('stockMoves'), data: { ts: Date.now(), day: today(), code: p.code, name: p.name, qty, type, ref: ref || '', before: num(p.stock), by: S.me?.username || '' } });
 
@@ -133,7 +133,7 @@ const root = $('#root');
 (async function boot() {
   root.innerHTML = `<div class="login"><div class="dim">Loading…</div></div>`;
   try { S.db = await createDB(); }
-  catch (e) { root.innerHTML = `<div class="login"><div class="card">Firebase load karanna bari una. Internet check karanna.<br><small class="dim">${esc(e.message)}</small></div></div>`; return; }
+  catch (e) { root.innerHTML = `<div class="login"><div class="card">Could not load Firebase. Please check your internet connection.<br><small class="dim">${esc(e.message)}</small></div></div>`; return; }
   S.db.onSync(s => { S.sync = s; renderSync(); });
   S.db.onAuth(async u => {
     S.user = u;
@@ -145,16 +145,25 @@ const root = $('#root');
 let unsubs = [];
 function startWatchers() {
   unsubs.forEach(f => f && f()); unsubs = [];
-  let ready = { emp: false, meta: false };
+  // cached profile + settings let the app open instantly; live data replaces them a moment later
+  const cache = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
+  const cMe = cache('cv_me_' + S.user.username), cMeta = cache('cv_meta');
+  if (cMe) { S.me = cMe; S.employees = S.employees.length ? S.employees : [cMe]; }
+  if (cMeta) S.meta = cMeta;
+  let ready = { emp: !!cMe, meta: !!cMe };
   const go = () => { if (ready.emp && ready.meta && !S._started) { S._started = true; afterLogin(); } };
+  setTimeout(go, 0);
   unsubs.push(S.db.watch('employees', (list, m = {}) => {
     S.employees = list.sort(by('name'));
-    S.me = list.find(e => e.id === S.user.username) || null;
+    const me = list.find(e => e.id === S.user.username) || null;
     // a brand-new device first sees an empty cache; wait for the server copy
-    if (!S.me && m.fromCache && navigator.onLine) return;
+    if (!me && m.fromCache && navigator.onLine && !cMe) return;
+    if (me) { S.me = me; try { localStorage.setItem('cv_me_' + S.user.username, JSON.stringify(me)); } catch (e) {} }
+    else if (!m.fromCache && !m.error) S.me = null;
+    if (S._started && S.me && S.me.active === false) { S.db.logout(); return; }
     ready.emp = true; go();
   }, { meta: true }));
-  unsubs.push(S.db.watch('meta', (list, m = {}) => { S.meta = list.find(d => d.id === 'settings') || S.meta || {}; ready.meta = true; go(); if (S._started && !m.error) rerenderSoft(); }));
+  unsubs.push(S.db.watch('meta', (list, m = {}) => { S.meta = list.find(d => d.id === 'settings') || S.meta || {}; if (!m.error) try { localStorage.setItem('cv_meta', JSON.stringify(S.meta)); } catch (e) {} ready.meta = true; go(); if (S._started && !m.error) rerenderSoft(); }));
   unsubs.push(S.db.watch('products', list => {
     S.products = list.map(p => ({ ...p, code: p.code || p.id })).sort(by('name'));
     S.pmap = Object.fromEntries(S.products.map(p => [p.code, p]));
@@ -170,13 +179,13 @@ async function afterLogin() {
   // First login ever: make this user the admin.
   if (!S.me && S.user.username === 'admin') {
     const doc = { username: S.user.username, name: S.user.username === 'admin' ? 'Admin' : S.user.username, role: 'admin', phone: '', active: true, ts: Date.now() };
-    root.innerHTML = `<div class="login"><div class="card">Palaweni setup eka karanawa…</div></div>`;
+    root.innerHTML = `<div class="login"><div class="card">Setting up for the first time…</div></div>`;
     try { await S.db.commitWait([{ op: 'set', col: 'employees', id: S.user.username, data: doc }]); }
-    catch (e) { root.innerHTML = `<div class="login"><div class="card">Setup eka fail una: ${esc(e.message)}<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
+    catch (e) { root.innerHTML = `<div class="login"><div class="card">Setup failed: ${esc(e.message)}<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
     location.reload(); return;
   }
-  if (!S.me) { root.innerHTML = `<div class="login"><div class="card">Me user ta account ekak set karala naha. Admin ta kiyanna.<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
-  if (S.me.active === false) { await S.db.logout(); toast('Account eka deactive karala', true); return; }
+  if (!S.me) { root.innerHTML = `<div class="login"><div class="card">This user has no employee account. Please contact the admin.<br><br><button class="btn" onclick="location.reload()">Retry</button></div></div>`; return; }
+  if (S.me.active === false) { await S.db.logout(); toast('This account has been deactivated', true); return; }
   if (!device().code) setDevice({ code: 'A' });
   renderShell();
   window.addEventListener('hashchange', route);
@@ -192,13 +201,13 @@ function renderLogin() {
     <label class="f">Username<input name="u" autocomplete="username" required></label><br>
     <label class="f">Password<input name="p" type="password" autocomplete="current-password" required></label><br>
     <button class="btn p lg" style="width:100%">Log In</button>
-    ${demo ? `<p class="dim" style="font-size:12px;margin-top:14px;text-align:center">Demo mode (Firebase set karala naha)<br>admin / admin123</p>` : ''}
+    ${demo ? `<p class="dim" style="font-size:12px;margin-top:14px;text-align:center">Demo mode (Firebase not configured)<br>admin / admin123</p>` : ''}
   </form></div>`;
   $('#lf').onsubmit = async e => {
     e.preventDefault(); const f = formData(e.target);
-    const b = $('button', e.target); b.disabled = true; b.textContent = 'Please wait…';
+    const b = $('button', e.target); b.disabled = true; b.textContent = 'Signing in…';
     try { await S.db.login(f.u.trim(), f.p); }
-    catch (err) { toast(/network/.test(err.code || err.message) ? 'Palaweni login ekata internet ona' : 'Username/password waradi', true); b.disabled = false; b.textContent = 'Log In'; }
+    catch (err) { toast(/network/.test(err.code || err.message) ? 'Internet is required for the first login' : 'Incorrect username or password', true); b.disabled = false; b.textContent = 'Log In'; }
   };
 }
 
@@ -220,7 +229,7 @@ function renderShell() {
     <main id="main"></main>
     <nav class="tabbar panel">${[['dashboard', 'Home'], ['pos', 'POS'], ['stock', 'Stock'], ['customers', 'Customers']].map(([r, t]) => `<a href="#/${r}" data-r="${r}">${ic(r)}${t}</a>`).join('')}<a href="javascript:void 0" id="more">${ic('more')}More</a></nav>
   </div>`;
-  $('#lo').onclick = async () => { if (await confirmBox('Logout wenawada?')) { S._started = false; await S.db.logout(); location.hash = ''; } };
+  $('#lo').onclick = async () => { if (await confirmBox('Log out now?')) { S._started = false; await S.db.logout(); location.hash = ''; } };
   $('#more').onclick = () => modal('Menu', `<div class="tiles">${items.filter(n => n[0] !== 'sep').map(n => `<a class="tile panel" href="#/${n[0]}"><span class="ic">${ic(n[0])}</span>${n[1]}</a>`).join('')}<a class="tile panel" id="lo2"><span class="ic">${ic('logout')}</span>Logout</a></div>`, {
     onMount(m, c) { $$('a[href]', m).forEach(a => a.addEventListener('click', c)); $('#lo2', m).onclick = async () => { c(); S._started = false; await S.db.logout(); }; }
   });
@@ -274,28 +283,28 @@ VIEWS.dashboard = {
     const monthInv = inv.filter(i => i.day.slice(0, 7) === t.slice(0, 7));
     const tiles = [['pos', 'Invoice', 'F2', 'rgba(141,198,63,.4)'], ['returns', 'Return', '', 'rgba(255,181,71,.35)'], ['stock', 'Stock', '', 'rgba(70,214,255,.35)'], ['grn', 'GRN', '', 'rgba(155,123,255,.4)', 1], ['verify', 'Stock Verify', '', 'rgba(70,214,255,.35)', 1], ['products', 'Products', '', 'rgba(141,198,63,.35)', 1], ['customers', 'Customers', '', 'rgba(255,181,71,.35)'], ['suppliers', 'Suppliers', supOut ? 'Rs ' + money(supOut) : '', 'rgba(255,93,108,.35)', 1], ['employees', 'Employees', '', 'rgba(155,123,255,.4)', 1], ['cash', 'Cash In/Out', '', 'rgba(141,198,63,.35)', 1], ['reports', 'Reports', '', 'rgba(70,214,255,.35)', 1], ['settings', 'Settings', '', 'rgba(255,255,255,.25)', 1]]
       .filter(x => !x[4] || isAdmin());
-    return `${!S.products.length && isAdmin() ? `<div class="card" style="margin-bottom:14px;border-color:rgba(184,240,90,.5)"><div class="row"><div class="grow"><b>Parana ERP eke data import karanna</b><div class="muted">Products 71, stock, suppliers, expense categories.</div></div><button class="btn p" id="imp">${ic('upload')}Import now</button></div></div>` : ''}
+    return `${!S.products.length && isAdmin() ? `<div class="card" style="margin-bottom:14px;border-color:rgba(184,240,90,.5)"><div class="row"><div class="grow"><b>Import data from the old ERP</b><div class="muted">Products 71, stock, suppliers, expense categories.</div></div><button class="btn p" id="imp">${ic('upload')}Import now</button></div></div>` : ''}
     <div class="grid g4">
       <div class="stat card"><div class="k">Today sales</div><div class="v">${money(sales)}</div><div class="s">${tInv.length} invoices</div></div>
-      ${isAdmin() ? `<div class="stat card"><div class="k">Today profit</div><div class="v good">${money(profit)}</div><div class="s">Month: ${money(sum(monthInv, 'profit'))}</div></div>` : `<div class="stat card"><div class="k">Cash sales</div><div class="v">${money(cash)}</div><div class="s">today</div></div>`}
+      ${isAdmin() ? `<div class="stat card"><div class="k">Today profit</div><div class="v good">${money(profit)}</div><div class="s">Month: ${money(sum(monthInv, 'profit'))}${monthInv.some(i => i.imported) ? ' (new bills)' : ''}</div></div>` : `<div class="stat card"><div class="k">Cash sales</div><div class="v">${money(cash)}</div><div class="s">today</div></div>`}
       <div class="stat card"><div class="k">This month</div><div class="v">${money(sum(monthInv, 'total'))}</div><div class="s">${monthInv.length} invoices</div></div>
       <div class="stat card"><div class="k">Low stock</div><div class="v ${low.length ? 'warn' : ''}">${low.length}</div><div class="s">items at reorder level</div></div>
     </div><br>
     <div class="tiles">${tiles.map(x => `<a class="tile panel" href="#/${x[0]}"><span class="ic" style="--glow:${x[3]}">${ic(x[0])}</span>${x[1]}${x[2] ? `<small>${x[2]}</small>` : ''}</a>`).join('')}</div><br>
     <div class="grid g2">
       <div class="card"><h2>Last 7 days</h2><div class="bars">${days.map((d, i) => `<div class="b" title="${d}: ${money(dTot[i])}"><i style="height:${(dTot[i] / mx) * 100}%"></i><span>${d.slice(8)}</span></div>`).join('')}</div></div>
-      <div class="card"><h2>Recent invoices</h2>${inv.slice(0, 6).map(i => `<div class="row" style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06)"><b style="width:70px">${esc(i.no)}</b><span class="grow muted">${fmtDT(i.ts)} · ${esc(i.customerName)}</span><b class="num">${money(i.total)}</b></div>`).join('') || '<div class="empty">Thama invoice naha</div>'}</div>
+      <div class="card"><h2>Recent invoices</h2>${inv.slice(0, 6).map(i => `<div class="row" style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06)"><b style="width:70px">${esc(i.no)}</b><span class="grow muted">${fmtDT(i.ts)} · ${esc(i.customerName)}</span><b class="num">${money(i.total)}</b></div>`).join('') || '<div class="empty">No invoices yet</div>'}</div>
     </div><br>
     <div class="grid g2">
       <div class="card"><h2>Low stock</h2>${low.slice(0, 8).map(p => `<div class="row" style="padding:5px 0"><span class="grow">${esc(p.name)}</span><span class="tag ${num(p.stock) <= 0 ? 'r' : 'a'}">${qtyf(p.stock)}</span></div>`).join('') || '<div class="dim">All good ✓</div>'}</div>
-      <div class="card"><h2>Balances</h2><div class="row" style="padding:5px 0"><span class="grow">Customer credit (ona)</span><b>${money(cusOut)}</b></div><div class="row" style="padding:5px 0"><span class="grow">Supplier outstanding (denna)</span><b class="${supOut ? 'bad' : ''}">${money(supOut)}</b></div><div class="row" style="padding:5px 0"><span class="grow">Stock value (cost)</span><b>${money(sum(S.products, p => num(p.stock) * num(p.cost)))}</b></div></div>
+      <div class="card"><h2>Balances</h2><div class="row" style="padding:5px 0"><span class="grow">Customer credit (receivable)</span><b>${money(cusOut)}</b></div><div class="row" style="padding:5px 0"><span class="grow">Supplier outstanding (payable)</span><b class="${supOut ? 'bad' : ''}">${money(supOut)}</b></div><div class="row" style="padding:5px 0"><span class="grow">Stock value (cost)</span><b>${money(sum(S.products, p => num(p.stock) * num(p.cost)))}</b></div></div>
     </div>`;
   },
   mount(el) { const b = $('#imp', el); if (b) b.onclick = importSeed; }
 };
 
 async function importSeed() {
-  if (!(await confirmBox('Parana ERP eke products 71, stock, suppliers 3 saha expense categories import karannada?', 'Import'))) return;
+  if (!(await confirmBox('Import 71 products, stock, 3 suppliers and expense categories from the old ERP?', 'Import'))) return;
   const ops = [];
   for (const p of SEED.products) {
     ops.push({ op: 'set', col: 'products', id: p.code, data: { ...p, ts: Date.now() } });
@@ -305,7 +314,7 @@ async function importSeed() {
   ops.push({ op: 'set', col: 'meta', id: 'settings', merge: true, data: { categories: SEED.categories, expenseCategories: SEED.expenseCategories, imported: Date.now() } });
   setDevice({ code: device().code || 'A', seq: Math.max(device().seq || 0, SEED.nextInvoiceNo - 1) });
   for (let i = 0; i < ops.length; i += 400) await commit(ops.slice(i, i + 400));
-  toast('Import iwarai ✓');
+  toast('Import complete ✓');
 }
 
 // ================================================================ POS
@@ -344,10 +353,11 @@ VIEWS.pos = {
       </div>
       <div class="right">
         <div class="seg" id="ptype">${[['retail', 'Retail'], ['wholesale', 'Wholesale'], ['loyalty', 'Loyalty']].map(([k, t]) => `<button data-t="${k}" class="${S.priceType === k ? 'on' : ''}">${t}</button>`).join('')}</div>
-        <div class="search">${ic('search')}<input id="q" placeholder="Barcode scan / code / name (F2)" autocomplete="off"></div>
+        <div class="search">${ic('search')}<input id="q" placeholder="Barcode scan / code / name (F2)" autocomplete="off"><div class="sugg panel" id="sugg"></div></div>
         <div class="seg" id="catf"><button data-c="" class="on">All</button>${cats().map(c => `<button data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
         <div class="results" id="res"></div>
-      </div></div>`;
+      </div></div>
+      <div class="paybar panel"><div class="grow" id="ptap"><small class="dim">Total · <span id="pcnt">0</span> items</small><b id="ptot">0.00</b></div><button class="btn p lg" id="pay2">${ic('pay')}Pay</button></div>`;
   },
   mount(el) {
     let cat = '';
@@ -356,41 +366,60 @@ VIEWS.pos = {
       const s = q.value.trim().toLowerCase();
       let list = S.products.filter(p => p.active !== false && (!cat || p.category === cat));
       if (s) list = list.filter(p => p.code.toLowerCase().includes(s) || p.name.toLowerCase().includes(s) || (p.barcode || '').toLowerCase() === s);
-      list = list.sort((a, b) => (num(b.stock) > 0) - (num(a.stock) > 0)).slice(0, 80);
-      $('#res', el).innerHTML = list.map((p, i) => `<div class="prod ${num(p.stock) <= 0 ? 'out' : ''} ${s && i === 0 ? 'hl' : ''}" data-code="${esc(p.code)}"><div class="nm">${esc(p.name)}</div><div class="pr">${money(priceOf(p, S.priceType))}</div><div class="st ${num(p.stock) <= 0 ? 'bad' : 'dim'}">${esc(p.code)} · Stock ${qtyf(p.stock)}</div></div>`).join('') || '<div class="empty">Product naha</div>';
+      list = list.sort((a, b) => (num(b.stock) > 0) - (num(a.stock) > 0)).slice(0, window.innerWidth < 900 && !s ? 24 : 80);
+      $('#res', el).innerHTML = list.map((p, i) => `<div class="prod ${num(p.stock) <= 0 ? 'out' : ''} ${s && i === 0 ? 'hl' : ''}" data-code="${esc(p.code)}"><div class="nm">${esc(p.name)}</div><div class="pr">${money(priceOf(p, S.priceType))}</div><div class="st ${num(p.stock) <= 0 ? 'bad' : 'dim'}">${esc(p.code)} · Stock ${qtyf(p.stock)}</div></div>`).join('') || '<div class="empty">No products found</div>';
     };
     const drawCart = () => {
       const t = cartTotals();
-      $('#tot', el).textContent = money(t.total);
+      $('#tot', el).textContent = money(t.total); $('#ptot', el).textContent = money(t.total); $('#pcnt', el).textContent = qtyf(t.items);
       $('#tsub', el).innerHTML = `${qtyf(t.items)} items${t.disc ? `<br>Disc -${money(t.disc)}` : ''}`;
       $('#lines', el).innerHTML = S.cart.map((l, i) => `<div class="line"><div class="n">${esc(l.name)}<small>${esc(l.code)} · stock ${qtyf(S.pmap[l.code]?.stock)}</small></div>
         <div class="qty"><button data-dq="${i}" data-v="-1">−</button><input data-q="${i}" value="${l.qty}" inputmode="decimal"><button data-dq="${i}" data-v="1">+</button></div>
         <input data-p="${i}" value="${l.price}" style="width:96px;text-align:right;padding:6px" inputmode="decimal">
-        <div class="row" style="gap:6px"><b class="num" style="min-width:86px">${money(l.qty * l.price - num(l.disc))}</b><button class="btn sm" data-rm="${i}">${ic('x')}</button></div></div>`).join('') || `<div class="empty">${ic('pos', 'width="40" style="opacity:.4"')}<br>Product ekak scan karanna / click karanna</div>`;
+        <div class="row" style="gap:6px"><b class="num" style="min-width:86px">${money(l.qty * l.price - num(l.disc))}</b><button class="btn sm" data-rm="${i}">${ic('x')}</button></div></div>`).join('') || `<div class="empty">${ic('pos', 'width="40" style="opacity:.4"')}<br>Scan or tap a product to add it</div>`;
       $('#hc', el).textContent = held().length;
     };
     const drawCus = () => {
       $('#cus', el).innerHTML = opt('', 'Cash customer', S.customerId) + S.customers.filter(c => c.active !== false).map(c => opt(c.id, `${c.name}${c.phone ? ' · ' + c.phone : ''}${num(c.balance) ? ' (Rs ' + money(c.balance) + ')' : ''}`, S.customerId)).join('');
     };
+    // dropdown under the search bar: matching items that are in stock
+    let sIdx = 0, sList = [];
+    const drawSugg = () => {
+      const s = q.value.trim().toLowerCase(), box = $('#sugg', el);
+      sList = s ? S.products.filter(p => p.active !== false && num(p.stock) > 0 && (p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s) || (p.barcode || '').toLowerCase() === s)).slice(0, 12) : [];
+      sIdx = Math.min(sIdx, Math.max(0, sList.length - 1));
+      if (!s) { box.style.display = 'none'; return; }
+      box.style.display = 'block';
+      box.innerHTML = sList.length ? sList.map((p, i) => `<div class="si ${i === sIdx ? 'on' : ''}" data-code="${esc(p.code)}"><div class="grow"><b>${esc(p.name)}</b><small class="dim">${esc(p.code)} · ${esc(p.category || '')}</small></div><span class="tag g">${qtyf(p.stock)} in stock</span><b class="num">${money(priceOf(p, S.priceType))}</b></div>`).join('') : '<div class="si dim">No items in stock for this search</div>';
+    };
+    const hideSugg = () => { $('#sugg', el).style.display = 'none'; };
     const add = code => {
-      const p = S.pmap[code]; if (!p) return toast('Product naha: ' + code, true);
+      const p = S.pmap[code]; if (!p) return toast('Product not found: ' + code, true);
       const l = S.cart.find(x => x.code === code);
       if (l) l.qty++; else S.cart.push({ code, name: p.name, qty: 1, price: priceOf(p, S.priceType), cost: num(p.cost), disc: 0 });
-      if (num(p.stock) <= (l ? l.qty - 1 : 0)) toast(`${p.name}: stock ${qtyf(p.stock)} witharai`, true);
+      if (num(p.stock) <= (l ? l.qty - 1 : 0)) toast(`${p.name}: only ${qtyf(p.stock)} in stock`, true);
       drawCart();
     };
     this.refresh = () => { drawRes(); drawCus(); drawCart(); };
     this.refresh();
     $('#idisc', el).value = S.invDisc || '';
-    q.oninput = debounce(drawRes, 60);
+    q.oninput = () => { sIdx = 0; drawSugg(); debounce(drawRes, 60)(); };
+    q.onfocus = drawSugg;
+    q.onblur = () => setTimeout(hideSugg, 180);
     q.onkeydown = e => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sIdx = (sIdx + (e.key === 'ArrowDown' ? 1 : -1) + sList.length) % (sList.length || 1); drawSugg(); return; }
+      if (e.key === 'Escape') { hideSugg(); return; }
       if (e.key !== 'Enter') return;
       const s = q.value.trim(); if (!s) return;
       const exact = S.products.find(p => p.code === s || p.barcode === s || p.code === s.padStart(5, '0'));
-      const first = $('.prod', $('#res', el));
-      if (exact) add(exact.code); else if (first) add(first.dataset.code);
-      q.value = ''; drawRes();
+      if (exact) add(exact.code); else if (sList[sIdx]) add(sList[sIdx].code); else return toast('No item in stock matches "' + s + '"', true);
+      q.value = ''; drawSugg(); drawRes();
     };
+    $('#sugg', el).addEventListener('mousedown', e => {
+      const r = e.target.closest('[data-code]'); if (!r) return;
+      e.preventDefault(); add(r.dataset.code); q.value = ''; drawSugg(); drawRes();
+      if (window.innerWidth >= 900) q.focus(); else q.blur();
+    });
     $('#res', el).onclick = e => { const p = e.target.closest('.prod'); if (p) { add(p.dataset.code); q.focus(); } };
     $('#catf', el).onclick = e => { const b = e.target.closest('button'); if (!b) return; cat = b.dataset.c; $$('#catf button', el).forEach(x => x.classList.toggle('on', x === b)); drawRes(); };
     $('#ptype', el).onclick = e => {
@@ -421,10 +450,10 @@ VIEWS.pos = {
     $('#hold', el).onclick = () => {
       if (!S.cart.length) return;
       const h = held(); h.push({ ts: Date.now(), cart: S.cart, customerId: S.customerId, priceType: S.priceType, disc: S.invDisc, total: cartTotals().total });
-      localStorage.setItem('cv_held', JSON.stringify(h)); S.cart = []; S.invDisc = ''; drawCart(); toast('Bill eka hold kala');
+      localStorage.setItem('cv_held', JSON.stringify(h)); S.cart = []; S.invDisc = ''; drawCart(); toast('Bill put on hold');
     };
     $('#recall', el).onclick = () => {
-      const h = held(); if (!h.length) return toast('Hold karapu bills naha');
+      const h = held(); if (!h.length) return toast('No bills on hold');
       modal('Held bills', h.map((b, i) => `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><span class="grow">${fmtDT(b.ts)} · ${b.cart.length} items · <b>${money(b.total)}</b></span><button class="btn sm p" data-i="${i}">Open</button><button class="btn sm d" data-del="${i}">${ic('trash')}</button></div>`).join(''), {
         onMount(m, close) {
           m.onclick = e => {
@@ -436,7 +465,9 @@ VIEWS.pos = {
       });
     };
     $('#pay', el).onclick = () => payModal(() => { S.cart = []; S.invDisc = ''; S.customerId = ''; route(); });
-    setTimeout(() => q.focus(), 50);
+    $('#pay2', el).onclick = () => $('#pay', el).click();
+    $('#ptap', el).onclick = () => $('.cart', el).scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (window.innerWidth >= 900) setTimeout(() => q.focus(), 50);
   }
 };
 const held = () => { try { return JSON.parse(localStorage.getItem('cv_held') || '[]'); } catch (e) { return []; } };
@@ -447,14 +478,14 @@ document.addEventListener('keydown', e => {
 });
 
 function payModal(done) {
-  if (!S.cart.length) return toast('Cart eka his', true);
+  if (!S.cart.length) return toast('Cart is empty', true);
   const t = cartTotals(), cus = S.cmap[S.customerId];
   const methods = ['cash', 'card', 'transfer', 'cheque', ...(cus ? ['credit'] : [])];
   modal('Payment', `<div class="row" style="justify-content:space-between;margin-bottom:14px"><span class="muted">${esc(cus?.name || 'Cash customer')}</span><span style="font-size:30px;font-weight:800">Rs ${money(t.total)}</span></div>
     <div class="form">${methods.map(m => `<label class="f">${m[0].toUpperCase() + m.slice(1)}<input name="${m}" inputmode="decimal" placeholder="0.00" ${m === 'cash' ? `value="${t.total}"` : ''}></label>`).join('')}</div>
     <div class="row" style="margin-top:12px;gap:6px">${[t.total, 1000, 5000, 10000, 20000].filter((v, i, a) => a.indexOf(v) === i && v >= t.total).slice(0, 4).map(v => `<button class="btn sm" data-cash="${v}">Cash ${money(v)}</button>`).join('')}</div>
     <div class="card" style="margin-top:14px;padding:14px"><div class="row"><span class="grow">Paid</span><b id="pd"></b></div><div class="row"><span class="grow">Balance / Change</span><b id="ch" style="font-size:22px"></b></div></div>
-    <label class="row" style="margin-top:12px;gap:8px"><input type="checkbox" name="print" ${localStorage.getItem('cv_noprint') ? '' : 'checked'}> Receipt print karanna</label>
+    <label class="row" style="margin-top:12px;gap:8px"><input type="checkbox" name="print" ${localStorage.getItem('cv_noprint') ? '' : 'checked'}> Print receipt</label>
     <div class="acts"><button class="btn" data-x2>Cancel</button><button class="btn p lg" id="go">Complete sale</button></div>`, {
     onMount(m, close) {
       const calc = () => {
@@ -482,7 +513,7 @@ function payModal(done) {
         const ops = [{ op: 'set', col: 'invoices', id, data: inv }];
         for (const l of inv.items) { const p = S.pmap[l.code]; ops.push({ op: 'update', col: 'products', id: l.code, data: { stock: INC(-l.qty) } }); ops.push(move(p, -l.qty, 'sale', inv.no)); }
         if (pay.credit && cus) ops.push({ op: 'update', col: 'customers', id: cus.id, data: { balance: INC(pay.credit) } });
-        if (await commit(ops, `Invoice ${inv.no} save una`)) {
+        if (await commit(ops, `Invoice ${inv.no} saved`)) {
           if (f.print) { localStorage.removeItem('cv_noprint'); printReceipt(inv); } else localStorage.setItem('cv_noprint', '1');
           close(); done();
         } else $('#go', m).disabled = false;
@@ -505,23 +536,30 @@ function printReceipt(inv) {
 }
 
 function invoiceModal(inv, id) {
-  modal(`Invoice ${esc(inv.no)} ${inv.status === 'void' ? '<span class="tag r">VOID</span>' : ''}`, `<div class="muted">${fmtDT(inv.ts)} · ${esc(inv.customerName)} · ${esc(inv.byName || inv.by)} · ${esc(inv.priceType)}</div><br>
+  modal(`Invoice ${esc(inv.no)} ${inv.status === 'void' ? '<span class="tag r">DELETED</span>' : ''}`, `<div class="muted">${fmtDT(inv.ts)} · ${esc(inv.customerName)} · ${esc(inv.byName || inv.by)} · ${esc(inv.priceType)}</div><br>
    ${tableHTML([{ k: 'name', t: 'Item' }, { k: 'qty', t: 'Qty', num: 1 }, { k: 'price', t: 'Price', money: 1 }, { k: 'amt', t: 'Amount', money: 1 }], inv.items.map(l => ({ ...l, amt: l.qty * l.price - num(l.disc) })), { amt: inv.total })}
    <br><div class="row">${Object.entries(inv.pay || {}).filter(([, v]) => v).map(([k, v]) => `<span class="tag">${k}: ${money(v)}</span>`).join('')}${inv.discount ? `<span class="tag a">Disc ${money(inv.discount)}</span>` : ''}${inv.returned ? `<span class="tag r">Returned ${money(inv.returned)}</span>` : ''}</div>
-   <div class="acts">${isAdmin() && inv.status !== 'void' ? `<button class="btn d" id="void">Void</button>` : ''}<button class="btn p" id="rp">${ic('print')}Print</button></div>`, {
+   ${inv.imported ? '<div class="muted" style="margin-top:10px">Bill imported from the old ERP — no item details.</div>' : ''}
+   <div class="acts">${isAdmin() && inv.status !== 'void' && !inv.imported ? `<button class="btn d" id="void">${ic('trash')}Delete bill</button>` : ''}<button class="btn p" id="rp">${ic('print')}Print</button></div>`, {
     wide: true,
     onMount(m, close) {
       $('#rp', m).onclick = () => printReceipt(inv);
       const v = $('#void', m);
-      if (v) v.onclick = async () => {
-        if (!(await confirmBox(`Invoice ${inv.no} void karannada? Stock eka aapahu ekathu wenawa.`, 'Void'))) return;
-        const ops = [{ op: 'update', col: 'invoices', id, data: { status: 'void', voidBy: S.me.username, voidTs: Date.now() } }];
-        for (const l of inv.items) { const p = S.pmap[l.code]; if (!p) continue; ops.push({ op: 'update', col: 'products', id: l.code, data: { stock: INC(l.qty) } }); ops.push(move(p, l.qty, 'void', inv.no)); }
-        if (inv.pay?.credit && inv.customerId) ops.push({ op: 'update', col: 'customers', id: inv.customerId, data: { balance: INC(-inv.pay.credit) } });
-        if (await commit(ops, 'Void kala')) close();
-      };
+      if (v) v.onclick = async () => { if (await deleteInvoice({ ...inv, id })) close(); };
     }
   });
+}
+// Delete a bill: it disappears from sales, every item goes back to stock,
+// credit given on the bill is removed from the customer. The record is kept as "deleted" for audit.
+async function deleteInvoice(inv, reason) {
+  if (inv.status === 'void') { toast('This bill is already deleted', true); return false; }
+  if (num(inv.returned) > 0) { toast('Some items on this bill were already returned. Use item return for the rest.', true); return false; }
+  const list = inv.items.map(l => `${esc(l.name)} × ${qtyf(l.qty)}`).join('<br>');
+  if (!(await confirmBox(`Delete bill <b>${esc(inv.no)}</b> (Rs ${money(inv.total)})?<br><br>These items will be added back to stock:<br>${list || '—'}`, 'Delete bill'))) return false;
+  const ops = [{ op: 'update', col: 'invoices', id: inv.id, data: { status: 'void', voidBy: S.me.username, voidTs: Date.now(), voidReason: reason || '' } }];
+  for (const l of inv.items) { const p = S.pmap[l.code]; if (!p) continue; ops.push({ op: 'update', col: 'products', id: l.code, data: { stock: INC(l.qty) } }); ops.push(move(p, l.qty, 'bill deleted', inv.no)); }
+  if (inv.pay?.credit && inv.customerId) ops.push({ op: 'update', col: 'customers', id: inv.customerId, data: { balance: INC(-inv.pay.credit) } });
+  return commit(ops, `Bill ${inv.no} deleted — items added back to stock`);
 }
 async function findInvoice(no) {
   no = String(no).trim().toUpperCase(); if (!no) return null;
@@ -535,25 +573,31 @@ async function findInvoice(no) {
 VIEWS.returns = {
   title: () => 'Returns',
   html: () => `<div class="grid g2">
-    <div class="card"><h2>Invoice eka hoyanna</h2><div class="row"><input id="ino" placeholder="Invoice no (e.g. A185)" class="grow" style="flex:1"><button class="btn p" id="find">${ic('search')}Find</button></div>
+    <div class="card"><h2>Find invoice</h2><div class="row"><input id="ino" placeholder="Invoice no (e.g. A185)" class="grow" style="flex:1"><button class="btn p" id="find">${ic('search')}Find</button></div>
       <div id="inv" style="margin-top:14px"></div></div>
     <div class="card"><h2>Return items</h2><div id="rl"></div>
-      <div class="form" style="margin-top:12px"><label class="f">Refund method<select id="rm"><option value="cash">Cash refund</option><option value="credit">Customer credit eken adu karanna</option><option value="exchange">Exchange (salli denne naha)</option></select></label>
+      <div class="form" style="margin-top:12px"><label class="f">Refund method<select id="rm"><option value="cash">Cash refund</option><option value="credit">Deduct from customer credit</option><option value="exchange">Exchange (no refund)</option></select></label>
       <label class="f">Reason<input id="rr" placeholder="Damage / wrong item…"></label></div>
       <div class="row" style="margin-top:14px"><b class="grow" id="rt">Total: 0.00</b><button class="btn p" id="proc">Process return</button></div></div>
-  </div><br><div class="card"><h2>Product ekak direct return karanna (invoice nathuwa)</h2><div class="row"><select id="mp" class="grow" style="flex:1"><option value="">Select product</option>${S.products.map(p => opt(p.code, `${p.code} · ${p.name}`)).join('')}</select><input id="mq" placeholder="Qty" style="width:90px"><input id="mpr" placeholder="Price" style="width:120px"><button class="btn" id="madd">${ic('plus')}Add</button></div></div>`,
+  </div><br><div class="card"><h2>Return a product without an invoice</h2><div class="row"><select id="mp" class="grow" style="flex:1"><option value="">Select product</option>${S.products.map(p => opt(p.code, `${p.code} · ${p.name}`)).join('')}</select><input id="mq" placeholder="Qty" style="width:90px"><input id="mpr" placeholder="Price" style="width:120px"><button class="btn" id="madd">${ic('plus')}Add</button></div></div>`,
   mount(el) {
     let inv = null, invId = '', lines = [];
     const draw = () => {
-      $('#rl', el).innerHTML = lines.length ? lines.map((l, i) => `<div class="row" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06)"><span class="grow">${esc(l.name)}<br><small class="dim">${money(l.price)}${l.max ? ` · max ${l.max}` : ''}</small></span><input data-i="${i}" value="${l.qty}" style="width:80px"><button class="btn sm" data-rm="${i}">${ic('x')}</button></div>`).join('') : '<div class="dim">Item naha</div>';
+      $('#rl', el).innerHTML = lines.length ? lines.map((l, i) => `<div class="row" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06)"><span class="grow">${esc(l.name)}<br><small class="dim">${money(l.price)}${l.max ? ` · max ${l.max}` : ''}</small></span><input data-i="${i}" value="${l.qty}" style="width:80px"><button class="btn sm" data-rm="${i}">${ic('x')}</button></div>`).join('') : '<div class="dim">No items</div>';
       $('#rt', el).textContent = 'Total: ' + money(sum(lines, l => l.qty * l.price));
     };
     draw();
     const find = async () => {
       inv = await findInvoice($('#ino', el).value);
-      if (!inv) { $('#inv', el).innerHTML = '<div class="bad">Invoice eka hambune naha</div>'; return; }
+      if (!inv) { $('#inv', el).innerHTML = '<div class="bad">Invoice not found</div>'; return; }
       invId = inv.id;
-      $('#inv', el).innerHTML = `<div class="muted">${fmtDT(inv.ts)} · ${esc(inv.customerName)} · Rs ${money(inv.total)} ${inv.status === 'void' ? '<span class="tag r">VOID</span>' : ''}</div><br>` + inv.items.map((l, i) => `<div class="row" style="padding:6px 0"><span class="grow">${esc(l.name)} × ${qtyf(l.qty)}</span><button class="btn sm" data-a="${i}">Return ${ic('returns')}</button></div>`).join('');
+      const deleted = inv.status === 'void';
+      $('#inv', el).innerHTML = `<div class="muted">${fmtDT(inv.ts)} · ${esc(inv.customerName)} · Rs ${money(inv.total)} ${deleted ? '<span class="tag r">DELETED</span>' : ''}</div><br>` +
+        inv.items.map((l, i) => `<div class="row" style="padding:6px 0"><span class="grow">${esc(l.name)} × ${qtyf(l.qty)}</span>${deleted ? '' : `<button class="btn sm" data-a="${i}">Return ${ic('returns')}</button>`}</div>`).join('') +
+        (deleted ? `<div class="bad" style="margin-top:10px">This bill was deleted${inv.voidBy ? ' by ' + esc(inv.voidBy) : ''}${inv.voidTs ? ' on ' + fmtDT(inv.voidTs) : ''}.</div>`
+          : `<div class="card" style="margin-top:14px;padding:14px;border-color:rgba(255,93,108,.4)"><b>Whole bill returned?</b><div class="muted" style="margin:4px 0 10px">Delete the bill and add all its items back to stock.</div><button class="btn d" id="delbill">${ic('trash')}Delete bill &amp; return all items</button></div>`);
+      const db = $('#delbill', el);
+      if (db) db.onclick = async () => { if (await deleteInvoice(inv, $('#rr', el).value)) { $('#ino', el).value = ''; find && setTimeout(() => { $('#inv', el).innerHTML = `<div class="good">Bill ${esc(inv.no)} deleted. Stock updated.</div>`; }, 50); } };
       if (inv.customerId) $('#rm', el).value = num(inv.pay?.credit) ? 'credit' : 'cash';
     };
     $('#find', el).onclick = find; $('#ino', el).onkeydown = e => e.key === 'Enter' && find();
@@ -568,16 +612,16 @@ VIEWS.returns = {
     $('#rl', el).onchange = e => { const i = e.target.dataset.i; if (i !== undefined) { const l = lines[i]; l.qty = Math.min(l.max || 1e9, Math.max(0, num(e.target.value))); setTimeout(draw, 0); } };
     $('#rl', el).onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { lines.splice(b.dataset.rm, 1); draw(); } };
     $('#proc', el).onclick = async () => {
-      lines = lines.filter(l => l.qty > 0); if (!lines.length) return toast('Return items naha', true);
+      lines = lines.filter(l => l.qty > 0); if (!lines.length) return toast('No items to return', true);
       const method = $('#rm', el).value, total = r2(sum(lines, l => l.qty * l.price));
-      if (method === 'credit' && !inv?.customerId) return toast('Credit return ekata customer kenek ona', true);
+      if (method === 'credit' && !inv?.customerId) return toast('A customer is required for a credit return', true);
       const no = 'R' + (device().code || 'A') + Date.now().toString().slice(-6);
       const rec = { no, ts: Date.now(), day: today(), invoiceNo: inv?.no || '', invoiceId: invId, customerId: inv?.customerId || '', customerName: inv?.customerName || 'Cash', items: lines.map(({ code, name, qty, price }) => ({ code, name, qty, price, cost: num(S.pmap[code]?.cost) })), total, cost: r2(sum(lines, l => l.qty * num(S.pmap[l.code]?.cost))), method, reason: $('#rr', el).value, by: S.me.username };
       const ops = [{ op: 'set', col: 'returns', id: S.db.newId('returns'), data: rec }];
       for (const l of lines) { ops.push({ op: 'update', col: 'products', id: l.code, data: { stock: INC(l.qty) } }); ops.push(move(S.pmap[l.code], l.qty, 'return', no)); }
       if (invId) ops.push({ op: 'update', col: 'invoices', id: invId, data: { returned: INC(total) } });
       if (method === 'credit') ops.push({ op: 'update', col: 'customers', id: inv.customerId, data: { balance: INC(-total) } });
-      if (await commit(ops, `Return ${no} save una (Rs ${money(total)})`)) route();
+      if (await commit(ops, `Return ${no} saved (Rs ${money(total)})`)) route();
     };
   }
 };
@@ -623,13 +667,13 @@ VIEWS.stock = {
   }
 };
 function adjustModal(p, sign) {
-  modal(`${sign > 0 ? 'Plus (+)' : 'Minus (−)'} stock — ${esc(p.name)}`, `<div class="muted">Danata stock: <b>${qtyf(p.stock)}</b></div><br><div class="form"><label class="f">Qty<input name="qty" inputmode="decimal"></label><label class="f">Reason<select name="reason">${(sign > 0 ? ['Found', 'Correction', 'Opening stock'] : ['Damage', 'Expired', 'Lost', 'Own use', 'Free issue', 'Correction']).map(x => opt(x, x)).join('')}</select></label><label class="f full">Note<input name="note"></label></div><div class="acts"><button class="btn p" id="ok">Save</button></div>`, {
+  modal(`${sign > 0 ? 'Plus (+)' : 'Minus (−)'} stock — ${esc(p.name)}`, `<div class="muted">Current stock: <b>${qtyf(p.stock)}</b></div><br><div class="form"><label class="f">Qty<input name="qty" inputmode="decimal"></label><label class="f">Reason<select name="reason">${(sign > 0 ? ['Found', 'Correction', 'Opening stock'] : ['Damage', 'Expired', 'Lost', 'Own use', 'Free issue', 'Correction']).map(x => opt(x, x)).join('')}</select></label><label class="f full">Note<input name="note"></label></div><div class="acts"><button class="btn p" id="ok">Save</button></div>`, {
     onMount(m, close) {
       $('#ok', m).onclick = async () => {
-        const f = formData(m), q = num(f.qty) * sign; if (!q) return toast('Qty danna', true);
+        const f = formData(m), q = num(f.qty) * sign; if (!q) return toast('Enter a quantity', true);
         const ops = [{ op: 'update', col: 'products', id: p.code, data: { stock: INC(q) } }, move(p, q, 'adjust', f.reason),
           { op: 'set', col: 'adjustments', id: S.db.newId('adjustments'), data: { ts: Date.now(), day: today(), code: p.code, name: p.name, qty: q, before: num(p.stock), cost: num(p.cost), reason: f.reason, note: f.note, by: S.me.username } }];
-        if (await commit(ops, 'Stock update una')) close();
+        if (await commit(ops, 'Stock updated')) close();
       };
     }
   });
@@ -642,11 +686,11 @@ function loadJsBarcode() {
   return jsb = jsb || new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
 }
 function labelModal(items) {
-  modal('Barcode labels', `<div class="dim" style="margin-bottom:10px">Label 48×28mm. Qty wenas karanna puluwan.</div>${items.map((p, i) => `<div class="row" style="padding:5px 0"><span class="grow">${esc(p.name)}</span><input data-i="${i}" value="${p.qty || 1}" style="width:80px"></div>`).join('')}
-   <label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="pp" checked> Price print karanna</label><div class="acts"><button class="btn p" id="go">${ic('print')}Print</button></div>`, {
+  modal('Barcode labels', `<div class="dim" style="margin-bottom:10px">Label size 48×28mm. You can change the quantity.</div>${items.map((p, i) => `<div class="row" style="padding:5px 0"><span class="grow">${esc(p.name)}</span><input data-i="${i}" value="${p.qty || 1}" style="width:80px"></div>`).join('')}
+   <label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="pp" checked> Print price</label><div class="acts"><button class="btn p" id="go">${ic('print')}Print</button></div>`, {
     onMount(m, close) {
       $('#go', m).onclick = async () => {
-        try { await loadJsBarcode(); } catch (e) { return toast('Barcode library load une naha (internet ona palaweni para)', true); }
+        try { await loadJsBarcode(); } catch (e) { return toast('Barcode library failed to load (internet needed the first time)', true); }
         const showP = $('#pp', m).checked; let html = '<div class="labels">';
         items.forEach((p, i) => { const n = Math.min(500, num($(`[data-i="${i}"]`, m).value)); for (let k = 0; k < n; k++) html += `<div class="label"><b>${esc(shop().name)}</b><div>${esc(p.name)}</div><svg class="bc" data-v="${esc(p.barcode || p.code)}"></svg>${showP ? `<b>Rs ${money(p.retail)}</b>` : ''}</div>`; });
         const pEl = $('#print'); pEl.className = 'rep'; pEl.innerHTML = html + '</div>';
@@ -666,7 +710,7 @@ VIEWS.grn = {
       <div style="padding:16px" class="form"><label class="f">Supplier<select id="sup"><option value="">— Select —</option>${S.suppliers.filter(s => s.active !== false).map(s => opt(s.id, s.name)).join('')}</select></label>
       <label class="f">Supplier invoice / ref<input id="ref"></label><label class="f">Paid now<input id="paid" inputmode="decimal" placeholder="0.00"></label><label class="f">Paid by<select id="pm"><option>cash</option><option>transfer</option><option>cheque</option><option>card</option></select></label></div>
       <div style="padding:0 16px 16px" class="row"><button class="btn" id="nsup">${ic('plus')}New supplier</button><button class="btn" id="pend">Pending <span class="tag" id="pc">0</span></button><span class="grow"></span><button class="btn d" id="rst">Reset</button><button class="btn p lg" id="proc">Process GRN</button></div></div>
-    <div class="card"><h2>Item add karanna</h2>
+    <div class="card"><h2>Add item</h2>
       <div class="search">${ic('search')}<input id="pq" list="plist" placeholder="Code / name / barcode"></div><datalist id="plist">${S.products.map(p => `<option value="${esc(p.code)}">${esc(p.name)}</option>`).join('')}</datalist>
       <div id="pinfo" class="muted" style="margin:8px 0"></div>
       <div class="form"><label class="f">Quantity<input id="q" inputmode="decimal"></label><label class="f">Unit cost<input id="c" inputmode="decimal"></label>
@@ -689,7 +733,7 @@ VIEWS.grn = {
     draw();
     const pick = () => {
       const v = $('#pq', el).value.trim(); sel = S.pmap[v] || S.products.find(p => p.barcode === v || p.name.toLowerCase() === v.toLowerCase());
-      if (!sel) { $('#pinfo', el).textContent = v ? 'Product naha — "New product" click karanna' : ''; return; }
+      if (!sel) { $('#pinfo', el).textContent = v ? 'Product not found — click "New product"' : ''; return; }
       $('#pinfo', el).innerHTML = `<b style="color:var(--ink)">${esc(sel.name)}</b> · stock ${qtyf(sel.stock)} · cost ${money(sel.cost)}`;
       $('#c', el).value = sel.cost || ''; $('#mrp', el).value = sel.mrp || ''; $('#ret', el).value = sel.retail || ''; $('#loy', el).value = sel.loyalty || ''; $('#wh', el).value = sel.wholesale || '';
       $('#q', el).focus();
@@ -697,21 +741,21 @@ VIEWS.grn = {
     $('#pq', el).onchange = pick; $('#pq', el).onkeydown = e => e.key === 'Enter' && pick();
     $('#tc', el).oninput = () => { const q = num($('#q', el).value); if (q) $('#c', el).value = r2(num($('#tc', el).value) / q); };
     $('#add', el).onclick = () => {
-      if (!sel) return toast('Product ekak select karanna', true);
-      const q = num($('#q', el).value); if (!q) return toast('Qty danna', true);
+      if (!sel) return toast('Select a product', true);
+      const q = num($('#q', el).value); if (!q) return toast('Enter a quantity', true);
       g.lines.push({ code: sel.code, name: sel.name, qty: q, cost: num($('#c', el).value), mrp: num($('#mrp', el).value), retail: num($('#ret', el).value), loyalty: num($('#loy', el).value), wholesale: num($('#wh', el).value), batch: $('#bt', el).value, exp: $('#ex', el).value });
       $$('.card input', el).forEach(i => i.value = ''); $('#pinfo', el).textContent = ''; sel = null; draw(); $('#pq', el).focus();
     };
     $('#gl', el).onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { g.lines.splice(b.dataset.rm, 1); draw(); } };
     $('#sup', el).onchange = e => { g.sup = e.target.value; save(); };
     $('#ref', el).oninput = e => { g.ref = e.target.value; save(); };
-    $('#rst', el).onclick = async () => { if (g.lines.length && !(await confirmBox('GRN eka clear karannada?'))) return; g = { lines: [], sup: '', ref: '' }; save(); route(); };
+    $('#rst', el).onclick = async () => { if (g.lines.length && !(await confirmBox('Clear this GRN?'))) return; g = { lines: [], sup: '', ref: '' }; save(); route(); };
     $('#np', el).onclick = () => productModal(null, code => { setTimeout(() => { $('#pq', el).value = code; pick(); }, 300); });
     $('#nsup', el).onclick = () => supplierModal(null);
     $('#pend', el).onclick = () => {
       const p = pendingGrns();
-      if (!g.lines.length && !p.length) return toast('Pending GRN naha');
-      modal('Pending GRNs', `${g.lines.length ? `<button class="btn" id="park">Danata thiyena GRN eka park karanna</button><br><br>` : ''}${p.map((x, i) => `<div class="row" style="padding:6px 0"><span class="grow">${fmtDT(x.ts)} · ${esc(S.smap[x.sup]?.name || '-')} · ${x.lines.length} items</span><button class="btn sm p" data-o="${i}">Open</button><button class="btn sm d" data-d="${i}">${ic('trash')}</button></div>`).join('')}`, {
+      if (!g.lines.length && !p.length) return toast('No pending GRNs');
+      modal('Pending GRNs', `${g.lines.length ? `<button class="btn" id="park">Park the current GRN</button><br><br>` : ''}${p.map((x, i) => `<div class="row" style="padding:6px 0"><span class="grow">${fmtDT(x.ts)} · ${esc(S.smap[x.sup]?.name || '-')} · ${x.lines.length} items</span><button class="btn sm p" data-o="${i}">Open</button><button class="btn sm d" data-d="${i}">${ic('trash')}</button></div>`).join('')}`, {
         onMount(m, close) {
           const pk = $('#park', m); if (pk) pk.onclick = () => { p.push({ ...g, ts: Date.now() }); localStorage.setItem('cv_grn_p', JSON.stringify(p)); g = { lines: [], sup: '', ref: '' }; save(); close(); route(); };
           m.onclick = e => { const o = e.target.closest('[data-o]'), d = e.target.closest('[data-d]'); if (o) { g = p.splice(o.dataset.o, 1)[0]; localStorage.setItem('cv_grn_p', JSON.stringify(p)); save(); close(); route(); } if (d) { p.splice(d.dataset.d, 1); localStorage.setItem('cv_grn_p', JSON.stringify(p)); close(); draw(); } };
@@ -719,10 +763,10 @@ VIEWS.grn = {
       });
     };
     $('#proc', el).onclick = async () => {
-      if (!g.lines.length) return toast('Items naha', true);
-      const sup = S.smap[$('#sup', el).value]; if (!sup) return toast('Supplier select karanna', true);
+      if (!g.lines.length) return toast('No items', true);
+      const sup = S.smap[$('#sup', el).value]; if (!sup) return toast('Select a supplier', true);
       const total = r2(sum(g.lines, l => l.qty * l.cost)), paid = r2(num($('#paid', el).value));
-      if (!(await confirmBox(`GRN process karannada?<br><b>${esc(sup.name)}</b> · Rs ${money(total)} · paid ${money(paid)}`, 'Process'))) return;
+      if (!(await confirmBox(`Process this GRN?<br><b>${esc(sup.name)}</b> · Rs ${money(total)} · paid ${money(paid)}`, 'Process'))) return;
       const no = 'G' + Date.now().toString().slice(-7);
       const ops = [{ op: 'set', col: 'grns', id: S.db.newId('grns'), data: { no, ts: Date.now(), day: today(), supplierId: sup.id, supplierName: sup.name, ref: g.ref, items: g.lines, total, paid, method: $('#pm', el).value, by: S.me.username } }];
       const agg = {};
@@ -738,9 +782,9 @@ VIEWS.grn = {
       }
       ops.push({ op: 'update', col: 'suppliers', id: sup.id, data: { balance: INC(total - paid) } });
       if (paid) ops.push({ op: 'set', col: 'payments', id: S.db.newId('payments'), data: { ts: Date.now(), day: today(), party: 'supplier', partyId: sup.id, partyName: sup.name, amount: paid, method: $('#pm', el).value, note: 'GRN ' + no, by: S.me.username } });
-      if (await commit(ops, `GRN ${no} save una`)) {
+      if (await commit(ops, `GRN ${no} saved`)) {
         const lines = g.lines; g = { lines: [], sup: '', ref: '' }; save();
-        if (await confirmBox('Barcode labels print karannada?')) labelModal(lines.map(l => ({ ...S.pmap[l.code], retail: l.retail || S.pmap[l.code].retail, qty: l.qty })));
+        if (await confirmBox('Print barcode labels?')) labelModal(lines.map(l => ({ ...S.pmap[l.code], retail: l.retail || S.pmap[l.code].retail, qty: l.qty })));
         route();
       }
     };
@@ -751,7 +795,7 @@ const pendingGrns = () => { try { return JSON.parse(localStorage.getItem('cv_grn
 // ================================================================ VERIFY
 VIEWS.verify = {
   title: () => 'Stock Verify',
-  html: () => `<div class="card" style="margin-bottom:12px"><div class="row"><select id="cat" style="width:200px"><option value="">All categories</option>${cats().map(c => opt(c, c)).join('')}</select><label class="row" style="gap:6px"><input type="checkbox" id="onlyin"> Stock thiyena ewa witharai</label><span class="grow"></span><span class="muted">Ganan karapu qty eka "Counted" ekata danna. His thibboth wenas wenne naha.</span></div></div>
+  html: () => `<div class="card" style="margin-bottom:12px"><div class="row"><select id="cat" style="width:200px"><option value="">All categories</option>${cats().map(c => opt(c, c)).join('')}</select><label class="row" style="gap:6px"><input type="checkbox" id="onlyin"> In-stock items only</label><span class="grow"></span><span class="muted">Enter the counted quantity in "Counted". Blank rows are not changed.</span></div></div>
    <div class="panel"><div class="tbl-wrap" id="tb"></div></div>
    <div class="row" style="margin-top:14px"><b class="grow" id="sm"></b><button class="btn p lg" id="ap">Apply differences</button></div>`,
   mount(el) {
@@ -767,15 +811,15 @@ VIEWS.verify = {
     $('#tb', el).onchange = e => { const c = e.target.dataset.c; if (c) { counted[c] = e.target.value; setTimeout(() => { draw(); const n = $(`[data-c="${CSS.escape(c)}"]`, el)?.closest('tr')?.nextElementSibling?.querySelector('input'); n && n.focus(); }, 0); } };
     $('#ap', el).onclick = async () => {
       const diffs = Object.entries(counted).filter(([k, v]) => v !== '' && S.pmap[k] && num(v) !== num(S.pmap[k].stock));
-      if (!diffs.length) return toast('Differences naha');
-      if (!(await confirmBox(`${diffs.length} items stock update karannada?`, 'Apply'))) return;
+      if (!diffs.length) return toast('No differences');
+      if (!(await confirmBox(`Update stock for ${diffs.length} items?`, 'Apply'))) return;
       const ops = [];
       for (const [code, v] of diffs) {
         const p = S.pmap[code], d = r2(num(v) - num(p.stock));
         ops.push({ op: 'update', col: 'products', id: code, data: { stock: INC(d), verified: Date.now() } }, move(p, d, 'verify', 'Stock verify'),
           { op: 'set', col: 'adjustments', id: S.db.newId('adjustments'), data: { ts: Date.now(), day: today(), code, name: p.name, qty: d, before: num(p.stock), cost: num(p.cost), reason: 'Stock verify', note: `Counted ${v}`, by: S.me.username } });
       }
-      if (await commit(ops, 'Stock verify iwarai')) route();
+      if (await commit(ops, 'Stock verification complete')) route();
     };
   }
 };
@@ -795,7 +839,7 @@ VIEWS.products = {
     $('#q', el).oninput = debounce(draw); $('#cat', el).onchange = draw;
     $('#new', el).onclick = () => productModal(null);
     $('#csv', el).onclick = () => downloadCSV('products-' + today(), cols, rows());
-    $('#cats', el).onclick = () => listEditor('Product categories', cats(), list => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { categories: list } }], 'Save una'));
+    $('#cats', el).onclick = () => listEditor('Product categories', cats(), list => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { categories: list } }], 'Saved'));
     $('#tb', el).onclick = e => {
       const ed = e.target.closest('[data-e]'), h = e.target.closest('[data-h]'), l = e.target.closest('[data-l]');
       if (ed) productModal(S.pmap[ed.dataset.e]);
@@ -825,13 +869,13 @@ function productModal(p, done) {
       $('[name=retail]', m).onchange = e => { ['loyalty', 'wholesale', 'mrp'].forEach(k => { const i = $(`[name=${k}]`, m); if (!i.value) i.value = e.target.value; }); };
       $('#sv', m).onclick = async () => {
         const f = formData(m); f.code = f.code.trim();
-        if (!f.code || !f.name.trim()) return toast('ID saha name ona', true);
-        if (isNew && S.pmap[f.code]) return toast('Me ID eka thiyenawa', true);
+        if (!f.code || !f.name.trim()) return toast('ID and name are required', true);
+        if (isNew && S.pmap[f.code]) return toast('This ID already exists', true);
         const data = { code: f.code, barcode: f.barcode.trim(), name: f.name.trim(), category: f.category, unit: f.unit, cost: num(f.cost), mrp: num(f.mrp), retail: num(f.retail), loyalty: num(f.loyalty) || num(f.retail), wholesale: num(f.wholesale) || num(f.retail), reorder: num(f.reorder), active: f.active, updated: Date.now() };
         const ops = [];
         if (isNew) { data.stock = num(f.stock); data.ts = Date.now(); ops.push({ op: 'set', col: 'products', id: f.code, data }); if (data.stock) ops.push(move({ ...data, stock: 0 }, data.stock, 'opening', 'New product')); }
         else ops.push({ op: 'update', col: 'products', id: f.code, data });
-        if (await commit(ops, 'Product save una')) { close(); done && done(f.code); }
+        if (await commit(ops, 'Product saved')) { close(); done && done(f.code); }
       };
     }
   });
@@ -841,7 +885,7 @@ async function productHistory(p) {
   modal('Stock movement — ' + esc(p.name), tableHTML([{ k: 'dt', t: 'Date' }, { k: 'type', t: 'Type' }, { k: 'ref', t: 'Ref' }, { k: 'before', t: 'Before', num: 1 }, { k: 'qty', t: 'Qty', num: 1 }, { k: 'after', t: 'After', num: 1 }, { k: 'by', t: 'By' }], moves.map(m => ({ ...m, dt: fmtDT(m.ts), after: num(m.before) + num(m.qty) }))), { wide: true });
 }
 function listEditor(title, list, onSave) {
-  modal(title, `<div id="li"></div><div class="row" style="margin-top:10px"><input id="nv" placeholder="Aluth eka" class="grow" style="flex:1"><button class="btn" id="ad">${ic('plus')}Add</button></div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
+  modal(title, `<div id="li"></div><div class="row" style="margin-top:10px"><input id="nv" placeholder="New item" class="grow" style="flex:1"><button class="btn" id="ad">${ic('plus')}Add</button></div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
     onMount(m, close) {
       list = [...list];
       const d = () => $('#li', m).innerHTML = list.map((x, i) => `<div class="row" style="padding:5px 0"><span class="grow">${esc(x)}</span><button class="btn sm" data-d="${i}">${ic('x')}</button></div>`).join('');
@@ -886,17 +930,17 @@ function customerModal(c, done) {
     <label class="f full">Address<input name="address" value="${esc(c.address || '')}"></label>
     <label class="f">Type<select name="type">${['Individual', 'Company'].map(x => opt(x, x, c.type)).join('')}</select></label><label class="f">Price type<select name="priceType">${[['retail', 'Retail'], ['wholesale', 'Wholesale'], ['loyalty', 'Loyalty']].map(([k, t]) => opt(k, t, c.priceType)).join('')}</select></label>
     <label class="f">Credit limit<input name="creditLimit" value="${c.creditLimit || ''}" inputmode="decimal"></label><label class="f">Pay date<input name="payDate" type="date" value="${esc(c.payDate || '')}"></label>
-    ${isNew ? `<label class="f">Opening balance (ona)<input name="balance" inputmode="decimal" placeholder="0.00"></label>` : ''}
+    ${isNew ? `<label class="f">Opening balance (receivable)<input name="balance" inputmode="decimal" placeholder="0.00"></label>` : ''}
     ${!isNew && isAdmin() ? `<label class="f row" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${c.active !== false ? 'checked' : ''}> Active</label>` : ''}</div>
     <div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
     onMount(m, close) {
       $('#sv', m).onclick = async () => {
-        const f = formData(m); if (!f.name.trim()) return toast('Name ona', true);
-        if (f.phone && S.customers.some(x => x.phone === f.phone && x.id !== c.id)) toast('Me phone number eka thawa customer kenekta thiyenawa', true);
+        const f = formData(m); if (!f.name.trim()) return toast('Name is required', true);
+        if (f.phone && S.customers.some(x => x.phone === f.phone && x.id !== c.id)) toast('Another customer already has this phone number', true);
         const id = c.id || S.db.newId('customers');
         const data = { name: f.name.trim(), phone: f.phone.trim(), nic: f.nic.trim(), address: f.address, type: f.type, priceType: f.priceType, creditLimit: num(f.creditLimit), payDate: f.payDate, updated: Date.now() };
         if (isNew) Object.assign(data, { balance: num(f.balance), ts: Date.now(), active: true }); else if ('active' in f) data.active = f.active;
-        if (await commit([{ op: isNew ? 'set' : 'update', col: 'customers', id, data }], 'Customer save una')) { close(); done && done(id); }
+        if (await commit([{ op: isNew ? 'set' : 'update', col: 'customers', id, data }], 'Customer saved')) { close(); done && done(id); }
       };
     }
   });
@@ -906,12 +950,12 @@ function paymentModal(party, x) {
   modal(`${isC ? 'Receive payment from' : 'Pay to'} ${esc(x.name)}`, `<div class="muted">Balance: <b style="color:var(--ink)">Rs ${money(x.balance)}</b></div><br><div class="form"><label class="f">Amount<input name="amount" value="${num(x.balance) > 0 ? x.balance : ''}" inputmode="decimal"></label><label class="f">Method<select name="method">${['cash', 'transfer', 'cheque', 'card', 'deposit'].map(k => opt(k, k)).join('')}</select></label><label class="f full">Note / cheque no<input name="note"></label></div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
     onMount(m, close) {
       $('#sv', m).onclick = async () => {
-        const f = formData(m), a = r2(num(f.amount)); if (!a) return toast('Amount danna', true);
+        const f = formData(m), a = r2(num(f.amount)); if (!a) return toast('Enter an amount', true);
         const ops = [{ op: 'update', col: isC ? 'customers' : 'suppliers', id: x.id, data: { balance: INC(-a) } },
           { op: 'set', col: 'payments', id: S.db.newId('payments'), data: { ts: Date.now(), day: today(), party, partyId: x.id, partyName: x.name, amount: a, method: f.method, note: f.note, by: S.me.username } }];
-        if (await commit(ops, 'Payment save una')) {
+        if (await commit(ops, 'Payment saved')) {
           close();
-          if (isC && await confirmBox('Receipt print karannada?')) { const s = shop(); printHTML(`<div class="c"><h1>${esc(s.name)}</h1>${esc(s.phone)}</div><hr><div class="c"><b>PAYMENT RECEIPT</b></div><br>${fmtDT(Date.now())}<br>Received from: ${esc(x.name)}<br>Amount: <b>Rs ${money(a)}</b><br>Method: ${esc(f.method)} ${esc(f.note)}<br>Balance: Rs ${money(num(x.balance) - a)}<hr><div class="c">${esc(s.receiptFooter)}</div>`, 'receipt'); }
+          if (isC && await confirmBox('Print receipt?')) { const s = shop(); printHTML(`<div class="c"><h1>${esc(s.name)}</h1>${esc(s.phone)}</div><hr><div class="c"><b>PAYMENT RECEIPT</b></div><br>${fmtDT(Date.now())}<br>Received from: ${esc(x.name)}<br>Amount: <b>Rs ${money(a)}</b><br>Method: ${esc(f.method)} ${esc(f.note)}<br>Balance: Rs ${money(num(x.balance) - a)}<hr><div class="c">${esc(s.receiptFooter)}</div>`, 'receipt'); }
         }
       };
     }
@@ -952,13 +996,13 @@ VIEWS.suppliers = {
 };
 function supplierModal(x) {
   const isNew = !x; x = x || {};
-  modal(isNew ? 'Add supplier' : 'Edit supplier', `<div class="form"><label class="f full">Name<input name="name" value="${esc(x.name || '')}"></label><label class="f">Telephone<input name="phone" value="${esc(x.phone || '')}"></label><label class="f">Bank acc no<input name="accNo" value="${esc(x.accNo || '')}"></label><label class="f full">Address<input name="address" value="${esc(x.address || '')}"></label><label class="f">Next pay date<input type="date" name="payDate" value="${esc(x.payDate || '')}"></label>${isNew ? `<label class="f">Opening balance (denna ona)<input name="balance" inputmode="decimal"></label>` : `<label class="f row" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${x.active !== false ? 'checked' : ''}> Active</label>`}</div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
+  modal(isNew ? 'Add supplier' : 'Edit supplier', `<div class="form"><label class="f full">Name<input name="name" value="${esc(x.name || '')}"></label><label class="f">Telephone<input name="phone" value="${esc(x.phone || '')}"></label><label class="f">Bank acc no<input name="accNo" value="${esc(x.accNo || '')}"></label><label class="f full">Address<input name="address" value="${esc(x.address || '')}"></label><label class="f">Next pay date<input type="date" name="payDate" value="${esc(x.payDate || '')}"></label>${isNew ? `<label class="f">Opening balance (payable)<input name="balance" inputmode="decimal"></label>` : `<label class="f row" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${x.active !== false ? 'checked' : ''}> Active</label>`}</div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
     onMount(m, close) {
       $('#sv', m).onclick = async () => {
-        const f = formData(m); if (!f.name.trim()) return toast('Name ona', true);
+        const f = formData(m); if (!f.name.trim()) return toast('Name is required', true);
         const data = { name: f.name.trim(), phone: f.phone, accNo: f.accNo, address: f.address, payDate: f.payDate, updated: Date.now() };
         if (isNew) Object.assign(data, { balance: num(f.balance), active: true, ts: Date.now() }); else data.active = f.active;
-        if (await commit([{ op: isNew ? 'set' : 'update', col: 'suppliers', id: x.id || S.db.newId('suppliers'), data }], 'Supplier save una')) close();
+        if (await commit([{ op: isNew ? 'set' : 'update', col: 'suppliers', id: x.id || S.db.newId('suppliers'), data }], 'Supplier saved')) close();
       };
     }
   });
@@ -977,7 +1021,7 @@ VIEWS.employees = {
       onMount(m, close) {
         $('#sv', m).onclick = async () => {
           const f = formData(m), a = num(f.amount), emp = S.employees.find(x => x.id === f.emp); if (!a) return;
-          if (await commit([{ op: 'set', col: 'expenses', id: S.db.newId('expenses'), data: { ts: Date.now(), day: today(), type: 'expense', category: 'Salary', amount: a, method: f.method, ref: emp.name, desc: f.note || 'Salary', empId: emp.id, by: S.me.username } }], 'Payment save una')) close();
+          if (await commit([{ op: 'set', col: 'expenses', id: S.db.newId('expenses'), data: { ts: Date.now(), day: today(), type: 'expense', category: 'Salary', amount: a, method: f.method, ref: emp.name, desc: f.note || 'Salary', empId: emp.id, by: S.me.username } }], 'Payment saved')) close();
         };
       }
     });
@@ -990,24 +1034,24 @@ function employeeModal(e) {
     ${isNew ? `<label class="f">Password (min 6)<input name="password" type="password" autocomplete="new-password"></label>` : '<div></div>'}
     <label class="f">Role<select name="role">${[['cashier', 'Cashier'], ['admin', 'Admin']].map(([k, t]) => opt(k, t, e.role)).join('')}</select></label><label class="f">Telephone<input name="phone" value="${esc(e.phone || '')}"></label>
     <label class="f">Daily wage<input name="wage" value="${e.wage || ''}" inputmode="decimal"></label>
-    ${!isNew ? `<label class="f row" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${e.active !== false ? 'checked' : ''}> Active (login karanna puluwan)</label>` : ''}</div>
+    ${!isNew ? `<label class="f row" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${e.active !== false ? 'checked' : ''}> Active (can log in)</label>` : ''}</div>
     ${!isNew && e.id === S.me.id ? `<br><button class="btn" id="cp">Change my password</button>` : ''}
     <div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
     onMount(m, close) {
-      const cp = $('#cp', m); if (cp) cp.onclick = async () => { const pw = prompt('Aluth password (min 6)'); if (pw && pw.length >= 6) { try { await S.db.changePassword(pw); toast('Password wenas kala'); } catch (er) { toast('Logout wela aye login wela try karanna', true); } } };
+      const cp = $('#cp', m); if (cp) cp.onclick = async () => { const pw = prompt('New password (min 6 characters)'); if (pw && pw.length >= 6) { try { await S.db.changePassword(pw); toast('Password changed'); } catch (er) { toast('Please log out, log in again and retry', true); } } };
       $('#sv', m).onclick = async () => {
         const f = formData(m), u = (f.username || '').trim().toLowerCase();
-        if (!f.name.trim() || !u) return toast('Name saha username ona', true);
-        if (!/^[a-z0-9._-]+$/.test(u)) return toast('Username eke a-z, 0-9 witharai', true);
+        if (!f.name.trim() || !u) return toast('Name and username are required', true);
+        if (!/^[a-z0-9._-]+$/.test(u)) return toast('Username can contain only a-z, 0-9, dot, dash and underscore', true);
         if (isNew) {
-          if (S.employees.some(x => x.id === u)) return toast('Username eka thiyenawa', true);
-          if ((f.password || '').length < 6) return toast('Password akuru 6k wath ona', true);
-          if (!navigator.onLine && S.db.mode !== 'demo') return toast('Aluth login hadanna internet ona', true);
-          try { await S.db.createLogin(u, f.password); } catch (er) { return toast('Login hadanna bari una: ' + er.message, true); }
+          if (S.employees.some(x => x.id === u)) return toast('This username already exists', true);
+          if ((f.password || '').length < 6) return toast('Password must be at least 6 characters', true);
+          if (!navigator.onLine && S.db.mode !== 'demo') return toast('Internet is required to create a new login', true);
+          try { await S.db.createLogin(u, f.password); } catch (er) { return toast('Could not create login: ' + er.message, true); }
         }
         const data = { username: u, name: f.name.trim(), role: f.role, phone: f.phone, wage: num(f.wage), updated: Date.now() };
         if (isNew) Object.assign(data, { active: true, ts: Date.now() }); else data.active = f.active;
-        if (await commit([{ op: isNew ? 'set' : 'update', col: 'employees', id: u, data }], 'Employee save una')) { close(); route(); }
+        if (await commit([{ op: isNew ? 'set' : 'update', col: 'employees', id: u, data }], 'Employee saved')) { close(); route(); }
       };
     }
   });
@@ -1019,7 +1063,7 @@ async function attendanceModal() {
       m.onclick = async e => {
         const i = e.target.closest('[data-in]'), o = e.target.closest('[data-out]'); if (!i && !o) return;
         const id = (i || o).dataset.in || (i || o).dataset.out;
-        await commit([{ op: 'set', col: 'attendance', id: `${id}_${d}`, merge: true, data: i ? { empId: id, day: d, ts: Date.now(), in: Date.now() } : { out: Date.now() } }], 'Save una');
+        await commit([{ op: 'set', col: 'attendance', id: `${id}_${d}`, merge: true, data: i ? { empId: id, day: d, ts: Date.now(), in: Date.now() } : { out: Date.now() } }], 'Saved');
         close(); attendanceModal();
       };
     }
@@ -1047,14 +1091,14 @@ VIEWS.cash = {
     load();
     $$('#fr,#to,#ty,#ct', el).forEach(i => i.onchange = load);
     $('#pr', el).onclick = () => printTable('Cash In / Out', `${$('#fr', el).value} → ${$('#to', el).value}`, cols, rows, { amount: sum(rows, 'amount') });
-    $('#cats', el).onclick = () => listEditor('Expense categories', expCats(), list => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { expenseCategories: list } }], 'Save una'));
-    $('#tb', el).onclick = async e => { const b = e.target.closest('[data-d]'); if (b && await confirmBox('Me entry eka delete karannada?', 'Delete')) { await commit([{ op: 'delete', col: 'expenses', id: b.dataset.d }], 'Delete kala'); load(); } };
+    $('#cats', el).onclick = () => listEditor('Expense categories', expCats(), list => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { expenseCategories: list } }], 'Saved'));
+    $('#tb', el).onclick = async e => { const b = e.target.closest('[data-d]'); if (b && await confirmBox('Delete this entry?', 'Delete')) { await commit([{ op: 'delete', col: 'expenses', id: b.dataset.d }], 'Deleted'); load(); } };
     $('#new', el).onclick = () => modal('Add entry', `<div class="form"><label class="f">Type<select name="type">${Object.entries(CASHT).map(([k, t]) => opt(k, t)).join('')}</select></label><label class="f">Category<select name="category">${expCats().map(c => opt(c, c)).join('')}</select></label><label class="f">Amount<input name="amount" inputmode="decimal"></label><label class="f">Method<select name="method"><option>cash</option><option>transfer</option><option>card</option><option>cheque</option></select></label><label class="f">Reference<input name="ref"></label><label class="f">Date<input type="date" name="day" value="${today()}"></label><label class="f full">Description<input name="desc"></label></div><div class="acts"><button class="btn p" id="sv">Save</button></div>`, {
       onMount(m, close) {
         $('#sv', m).onclick = async () => {
-          const f = formData(m), a = num(f.amount); if (!a) return toast('Amount danna', true);
+          const f = formData(m), a = num(f.amount); if (!a) return toast('Enter an amount', true);
           const ts = f.day === today() ? Date.now() : dStart(f.day) + 12 * 3600e3;
-          if (await commit([{ op: 'set', col: 'expenses', id: S.db.newId('expenses'), data: { ts, day: f.day, type: f.type, category: f.category, amount: a, method: f.method, ref: f.ref, desc: f.desc, by: S.me.username } }], 'Save una')) { close(); load(); }
+          if (await commit([{ op: 'set', col: 'expenses', id: S.db.newId('expenses'), data: { ts, day: f.day, type: f.type, category: f.category, amount: a, method: f.method, ref: f.ref, desc: f.desc, by: S.me.username } }], 'Saved')) { close(); load(); }
         };
       }
     });
@@ -1118,38 +1162,40 @@ const RUN = {
     const all = (await S.db.range('invoices', f.from, f.to)).filter(i => !f.emp || i.by === f.emp);
     const rows = all.map(i => ({ ...i, dt: fmtDT(i.ts), status: i.status, credit: num(i.pay?.credit), cash: num(i.pay?.cash) - num(i.change), card: num(i.pay?.card), transfer: num(i.pay?.transfer), cheque: num(i.pay?.cheque) }));
     const ok = rows.filter(r => r.status !== 'void');
-    const cols = [{ k: 'no', t: 'Inv', html: r => `<a href="javascript:void 0" data-inv="${r.id}">${esc(r.no)}</a> ${r.status === 'void' ? '<span class="tag r">void</span>' : ''}` }, { k: 'dt', t: 'Date & time' }, { k: 'customerName', t: 'Customer' }, { k: 'byName', t: 'Cashier' }, { k: 'total', t: 'Total', money: 1 }, { k: 'cash', t: 'Cash', money: 1 }, { k: 'card', t: 'Card', money: 1 }, { k: 'transfer', t: 'Transfer', money: 1 }, { k: 'cheque', t: 'Cheque', money: 1 }, { k: 'credit', t: 'Credit', money: 1 }];
+    const cols = [{ k: 'no', t: 'Inv', html: r => `<a href="javascript:void 0" data-inv="${r.id}">${esc(r.no)}</a> ${r.status === 'void' ? `<span class="tag r" title="Deleted by ${esc(r.voidBy || '')}">deleted</span>` : ''}` }, { k: 'dt', t: 'Date & time' }, { k: 'customerName', t: 'Customer' }, { k: 'byName', t: 'Cashier' }, { k: 'total', t: 'Total', money: 1 }, { k: 'cash', t: 'Cash', money: 1 }, { k: 'card', t: 'Card', money: 1 }, { k: 'transfer', t: 'Transfer', money: 1 }, { k: 'cheque', t: 'Cheque', money: 1 }, { k: 'credit', t: 'Credit', money: 1 }];
     const foot = Object.fromEntries(['total', 'cash', 'card', 'transfer', 'cheque', 'credit'].map(k => [k, sum(ok, k)]));
     return { cols, rows, foot, stats: [['Invoices', ok.length], ['Sales', money(foot.total)], ['Cash', money(foot.cash)], ['Avg bill', money(ok.length ? foot.total / ok.length : 0)]] };
   },
   async daily(f) {
     const inv = await invRange(f), rets = await S.db.range('returns', f.from, f.to), map = {};
-    for (let d = f.fd; d <= f.td; d = addDays(d, 1)) map[d] = { day: d, count: 0, total: 0, cost: 0, profit: 0, cash: 0, other: 0, returns: 0 };
-    inv.forEach(i => { const m = map[i.day]; if (!m) return; m.count++; m.total += i.total; m.cost += num(i.cost); m.profit += num(i.profit); m.cash += num(i.pay?.cash) - num(i.change); m.other += i.total - (num(i.pay?.cash) - num(i.change)); });
+    for (let d = f.fd; d <= f.td; d = addDays(d, 1)) map[d] = { day: d, count: 0, total: 0, cost: 0, profit: 0, cash: 0, other: 0, returns: 0, old: 0 };
+    inv.forEach(i => { const m = map[i.day]; if (!m) return; m.count++; m.total += i.total; if (i.imported) m.old++; else { m.cost += num(i.cost); m.profit += num(i.profit); } m.cash += num(i.pay?.cash) - num(i.change); m.other += i.total - (num(i.pay?.cash) - num(i.change)); });
     rets.forEach(r => { const m = map[r.day]; if (m) m.returns += r.total; });
     const rows = Object.values(map).reverse();
-    const cols = [{ k: 'day', t: 'Date' }, { k: 'count', t: 'Invoices', num: 1 }, { k: 'total', t: 'Sales', money: 1 }, { k: 'cash', t: 'Cash', money: 1 }, { k: 'other', t: 'Card/Other', money: 1 }, { k: 'returns', t: 'Returns', money: 1 }, ...(isAdmin() ? [{ k: 'cost', t: 'Cost', money: 1 }, { k: 'profit', t: 'Profit', money: 1 }] : [])];
+    const cols = [{ k: 'day', t: 'Date' }, { k: 'count', t: 'Invoices', num: 1 }, { k: 'total', t: 'Sales', money: 1 }, { k: 'cash', t: 'Cash', money: 1 }, { k: 'other', t: 'Card/Other', money: 1 }, { k: 'returns', t: 'Returns', money: 1 }, ...(isAdmin() ? [{ k: 'cost', t: 'Cost', money: 1, html: r => r.old && r.old === r.count ? '<span class="dim">–</span>' : money(r.cost) }, { k: 'profit', t: 'Profit', money: 1, html: r => r.old && r.old === r.count ? '<span class="dim" title="Old ERP bills — no cost data">–</span>' : money(r.profit) + (r.old ? ' <span class="tag a" title="Old ERP bills are not included in profit">+old</span>' : '') }] : [])];
     const foot = Object.fromEntries(['count', 'total', 'cash', 'other', 'returns', 'cost', 'profit'].map(k => [k, sum(rows, k)]));
     const asc = [...rows].reverse();
-    return { cols, rows, foot, chart: rows.length <= 62 ? barChart(asc.map(r => r.day.slice(8)), asc.map(r => r.total)) : '', stats: [['Sales', money(foot.total)], ['Profit', money(foot.profit), 'good'], ['Invoices', foot.count], ['Returns', money(foot.returns), 'warn']] };
+    return { cols, rows, foot, chart: rows.length <= 62 ? barChart(asc.map(r => r.day.slice(8)), asc.map(r => r.total)) : '', stats: [['Sales', money(foot.total)], ['Profit' + (sum(rows, 'old') ? ' (new bills)' : ''), foot.count && sum(rows, 'old') === foot.count ? '–' : money(foot.profit), 'good'], ['Invoices', foot.count], ['Returns', money(foot.returns), 'warn']] };
   },
   async items(f) {
     const inv = await invRange(f), m = {};
     inv.forEach(i => { const ratio = i.subtotal ? i.total / i.subtotal : 1; i.items.forEach(l => { const p = S.pmap[l.code]; if (f.cat && p?.category !== f.cat) return; const x = m[l.code] = m[l.code] || { code: l.code, name: l.name, category: p?.category || '', qty: 0, sales: 0, cost: 0 }; x.qty += l.qty; x.sales += (l.qty * l.price - num(l.disc)) * ratio; x.cost += l.qty * num(l.cost); }); });
     const rows = Object.values(m).map(x => ({ ...x, profit: x.sales - x.cost })).sort(by('qty', true));
+    const oldN = inv.filter(i => i.imported).length;
     const foot = { qty: sum(rows, 'qty'), sales: sum(rows, 'sales'), cost: sum(rows, 'cost'), profit: sum(rows, 'profit') };
-    return { cols: [{ k: 'code', t: 'ID' }, { k: 'name', t: 'Item' }, { k: 'category', t: 'Category' }, { k: 'qty', t: 'Qty', num: 1 }, { k: 'sales', t: 'Sales', money: 1 }, { k: 'cost', t: 'Cost', money: 1 }, { k: 'profit', t: 'Profit', money: 1 }], rows, foot, stats: [['Items sold', qtyf(foot.qty)], ['Sales', money(foot.sales)], ['Cost', money(foot.cost)], ['Profit', money(foot.profit), 'good']] };
+    return { cols: [{ k: 'code', t: 'ID' }, { k: 'name', t: 'Item' }, { k: 'category', t: 'Category' }, { k: 'qty', t: 'Qty', num: 1 }, { k: 'sales', t: 'Sales', money: 1 }, { k: 'cost', t: 'Cost', money: 1 }, { k: 'profit', t: 'Profit', money: 1 }], rows, foot, stats: [['Items sold', qtyf(foot.qty)], ['Sales', money(foot.sales)], ['Cost', money(foot.cost)], ['Profit', money(foot.profit), 'good']], chart: oldN ? `<span class="muted">${oldN} old ERP bills are not included in this report (no item details).</span>` : '' };
   },
   async pnl(f) {
     const [inv, rets, exp, adj] = await Promise.all([invRange(f), S.db.range('returns', f.from, f.to), S.db.range('expenses', f.from, f.to), S.db.range('adjustments', f.from, f.to)]);
-    const sales = sum(inv, 'total'), cogs = sum(inv, 'cost'), ret = sum(rets, 'total'), retCost = sum(rets, 'cost');
+    const oldInv = inv.filter(i => i.imported), newInv = inv.filter(i => !i.imported);
+    const sales = sum(newInv, 'total'), cogs = sum(newInv, 'cost'), ret = sum(rets, 'total'), retCost = sum(rets, 'cost'), oldSales = sum(oldInv, 'total');
     const loss = -sum(adj.filter(a => a.qty < 0), a => a.qty * num(a.cost)), gain = sum(adj.filter(a => a.qty > 0), a => a.qty * num(a.cost));
     const ex = exp.filter(e => e.type === 'expense'), byCat = {};
     ex.forEach(e => byCat[e.category] = (byCat[e.category] || 0) + num(e.amount));
     const gross = sales - ret - (cogs - retCost);
     const net = gross - sum(ex, 'amount') - loss + gain;
     const rows = [{ item: 'Sales', amount: sales }, { item: 'Less: Returns', amount: -ret }, { item: 'Net sales', amount: sales - ret, b: 1 }, { item: 'Cost of goods sold', amount: -(cogs - retCost) }, { item: 'GROSS PROFIT', amount: gross, b: 1 },
-      ...Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ item: 'Expense: ' + k, amount: -v })), { item: 'Stock loss (damage/lost)', amount: -loss }, { item: 'Stock gain', amount: gain }, { item: 'NET PROFIT', amount: net, b: 1 }];
+      ...Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ item: 'Expense: ' + k, amount: -v })), { item: 'Stock loss (damage/lost)', amount: -loss }, { item: 'Stock gain', amount: gain }, { item: 'NET PROFIT', amount: net, b: 1 }, ...(oldSales ? [{ item: 'Old ERP sales (no cost data — not included in profit)', amount: oldSales }] : [])];
     return { cols: [{ k: 'item', t: 'Item', html: r => r.b ? `<b>${esc(r.item)}</b>` : esc(r.item) }, { k: 'amount', t: 'Amount', html: r => `<span class="${r.amount < 0 ? 'bad' : ''}">${r.b ? '<b>' : ''}${money(r.amount)}${r.b ? '</b>' : ''}</span>` }], rows, stats: [['Net sales', money(sales - ret)], ['Gross profit', money(gross), 'good'], ['Expenses', money(sum(ex, 'amount')), 'warn'], ['Net profit', money(net), net >= 0 ? 'good' : 'bad']] };
   },
   async byemp(f) {
@@ -1197,18 +1243,18 @@ VIEWS.settings = {
   title: () => 'Settings',
   html: () => {
     const s = shop(), d = device();
-    return `<div class="grid g2"><div class="card"><h2>Shop details (receipt eke)</h2><div class="form" id="sf">
+    return `<div class="grid g2"><div class="card"><h2>Shop details (shown on receipt)</h2><div class="form" id="sf">
       <label class="f full">Shop name<input name="name" value="${esc(s.name)}"></label><label class="f">Phone<input name="phone" value="${esc(s.phone)}"></label><label class="f">Address<input name="address" value="${esc(s.address)}"></label>
       <label class="f full">Receipt footer<input name="receiptFooter" value="${esc(s.receiptFooter)}"></label></div><div class="acts"><button class="btn p" id="ss">Save</button></div></div>
-    <div class="card"><h2>Me device eka</h2><p class="muted">Device eka eka eka invoice number prefix ekak ganna ona (A, B, C…). Offline welawe device dekaka ekama number eka enne naha.</p><div class="form"><label class="f">Device code<input id="dc" value="${esc(d.code || 'A')}" maxlength="2"></label><label class="f">Last invoice no<input id="ds" value="${d.seq || 0}" inputmode="numeric"></label></div><div class="acts"><button class="btn p" id="sd">Save</button></div></div>
-    <div class="card"><h2>Data</h2><p class="muted">Mode: <b>${S.db.mode === 'firebase' ? 'Firebase (online sync)' : 'Demo (me device eke witharai)'}</b></p><div class="row"><button class="btn" id="bk">${ic('download')}Backup (JSON)</button><label class="btn">${ic('upload')}Restore<input type="file" id="rs" accept=".json" hidden></label><button class="btn" id="imp">Old ERP data import</button></div></div>
-    <div class="card"><h2>App eka</h2><p class="muted">Version 1.0 · Offline ready ${'serviceWorker' in navigator ? '✓' : '✗'}</p><div class="row"><button class="btn" id="upd">Update check</button></div></div></div>`;
+    <div class="card"><h2>This device</h2><p class="muted">Give each device its own invoice prefix (A, B, C…) so two devices never create the same invoice number while offline.</p><div class="form"><label class="f">Device code<input id="dc" value="${esc(d.code || 'A')}" maxlength="2"></label><label class="f">Last invoice no<input id="ds" value="${d.seq || 0}" inputmode="numeric"></label></div><div class="acts"><button class="btn p" id="sd">Save</button></div></div>
+    <div class="card"><h2>Data</h2><p class="muted">Mode: <b>${S.db.mode === 'firebase' ? 'Firebase (online sync)' : 'Demo (this device only)'}</b></p><div class="row"><button class="btn" id="bk">${ic('download')}Backup (JSON)</button><label class="btn">${ic('upload')}Restore<input type="file" id="rs" accept=".json" hidden></label><button class="btn" id="imp">Old ERP data import</button></div></div>
+    <div class="card"><h2>App</h2><p class="muted">Version 1.0 · Offline ready ${'serviceWorker' in navigator ? '✓' : '✗'}</p><div class="row"><button class="btn" id="upd">Update check</button></div></div></div>`;
   },
   mount(el) {
-    $('#ss', el).onclick = () => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { shop: formData($('#sf', el)) } }], 'Save una');
-    $('#sd', el).onclick = () => { setDevice({ code: $('#dc', el).value.trim().toUpperCase() || 'A', seq: num($('#ds', el).value) }); toast('Save una'); renderShell(); route(); };
+    $('#ss', el).onclick = () => commit([{ op: 'set', col: 'meta', id: 'settings', merge: true, data: { shop: formData($('#sf', el)) } }], 'Saved');
+    $('#sd', el).onclick = () => { setDevice({ code: $('#dc', el).value.trim().toUpperCase() || 'A', seq: num($('#ds', el).value) }); toast('Saved'); renderShell(); route(); };
     $('#imp', el).onclick = importSeed;
-    $('#upd', el).onclick = async () => { const r = await navigator.serviceWorker?.getRegistration(); await r?.update(); toast('Aluth version ekak thiyenawanam reload weddi enawa'); setTimeout(() => location.reload(), 900); };
+    $('#upd', el).onclick = async () => { const r = await navigator.serviceWorker?.getRegistration(); await r?.update(); toast('If a new version is available it will load after reload'); setTimeout(() => location.reload(), 900); };
     $('#bk', el).onclick = async () => {
       const cols = ['products', 'customers', 'suppliers', 'employees', 'invoices', 'returns', 'grns', 'payments', 'expenses', 'adjustments', 'stockMoves', 'attendance', 'meta'];
       const out = {}; for (const c of cols) out[c] = await S.db.all(c);
@@ -1216,11 +1262,11 @@ VIEWS.settings = {
     };
     $('#rs', el).onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
-      if (!(await confirmBox('Backup eka restore karannada? Thiyena data overwrite wenawa.', 'Restore'))) return;
+      if (!(await confirmBox('Restore this backup? Existing records with the same ID will be overwritten.', 'Restore'))) return;
       const data = JSON.parse(await file.text()), ops = [];
       for (const [col, list] of Object.entries(data)) for (const d of list) { const { id, ...rest } = d; ops.push({ op: 'set', col, id, data: rest }); }
       for (let i = 0; i < ops.length; i += 400) await commit(ops.slice(i, i + 400));
-      toast('Restore iwarai');
+      toast('Restore complete');
     };
   }
 };

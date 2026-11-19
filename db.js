@@ -23,9 +23,7 @@ export async function createDB() {
 
 // ------------------------------------------------------------------ Firebase
 async function firebaseDB() {
-  const appM = await import(FB + 'firebase-app.js');
-  const fs = await import(FB + 'firebase-firestore.js');
-  const au = await import(FB + 'firebase-auth.js');
+  const [appM, fs, au] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-firestore.js'), import(FB + 'firebase-auth.js')]);
   const app = appM.initializeApp(CONFIG.firebase);
   const db = fs.initializeFirestore(app, {
     localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() })

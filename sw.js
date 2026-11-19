@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION on every deploy.
-const VERSION = 'cv-erp-v1.1.2';
+const VERSION = 'cv-erp-v1.2.0';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'db.js', 'config.js', 'seed.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const EXTRA = [FB + 'firebase-app.js', FB + 'firebase-firestore.js', FB + 'firebase-auth.js', 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js'];

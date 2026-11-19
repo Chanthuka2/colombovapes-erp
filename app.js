@@ -188,7 +188,7 @@ async function afterLogin() {
   if (S.me.active === false) { await S.db.logout(); toast('This account has been deactivated', true); return; }
   if (!device().code) setDevice({ code: 'A' });
   renderShell();
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => { $$('.modal-bg').forEach(m => m.remove()); route(); }); // never leave a popup over a new page
   route();
 }
 
@@ -396,8 +396,8 @@ VIEWS.pos = {
     const add = code => {
       const p = S.pmap[code]; if (!p) return toast('Product not found: ' + code, true);
       const l = S.cart.find(x => x.code === code);
+      if ((l ? l.qty : 0) + 1 > num(p.stock)) return toast(num(p.stock) > 0 ? `${p.name}: only ${qtyf(p.stock)} in stock` : `${p.name} is out of stock`, true);
       if (l) l.qty++; else S.cart.push({ code, name: p.name, qty: 1, price: priceOf(p, S.priceType), cost: num(p.cost), disc: 0 });
-      if (num(p.stock) <= (l ? l.qty - 1 : 0)) toast(`${p.name}: only ${qtyf(p.stock)} in stock`, true);
       drawCart();
     };
     this.refresh = () => { drawRes(); drawCus(); drawCart(); };
@@ -430,12 +430,12 @@ VIEWS.pos = {
     };
     $('#lines', el).onclick = e => {
       const dq = e.target.closest('[data-dq]'), rm = e.target.closest('[data-rm]');
-      if (dq) { const l = S.cart[dq.dataset.dq]; l.qty = Math.max(1, r2(l.qty + num(dq.dataset.v))); drawCart(); }
+      if (dq) { const l = S.cart[dq.dataset.dq], st = num(S.pmap[l.code]?.stock); const n = Math.max(1, r2(l.qty + num(dq.dataset.v))); if (n > st) toast(`Only ${qtyf(st)} in stock`, true); else l.qty = n; drawCart(); }
       if (rm) { S.cart.splice(rm.dataset.rm, 1); drawCart(); }
     };
     $('#lines', el).onchange = e => {
       const i = e.target.dataset.q ?? e.target.dataset.p; if (i === undefined) return;
-      if (e.target.dataset.q !== undefined) S.cart[i].qty = Math.max(0.001, num(e.target.value) || 1);
+      if (e.target.dataset.q !== undefined) { const st = num(S.pmap[S.cart[i].code]?.stock); let n = Math.max(0.001, num(e.target.value) || 1); if (n > st) { toast(`Only ${qtyf(st)} in stock`, true); n = Math.max(1, st); } S.cart[i].qty = n; }
       else S.cart[i].price = num(e.target.value);
       setTimeout(drawCart, 0);
     };
@@ -479,6 +479,8 @@ document.addEventListener('keydown', e => {
 
 function payModal(done) {
   if (!S.cart.length) return toast('Cart is empty', true);
+  const short = S.cart.find(l => l.qty > num(S.pmap[l.code]?.stock));
+  if (short) return toast(`${short.name}: only ${qtyf(S.pmap[short.code]?.stock)} in stock now`, true);
   const t = cartTotals(), cus = S.cmap[S.customerId];
   const methods = ['cash', 'card', 'transfer', 'cheque', ...(cus ? ['credit'] : [])];
   modal('Payment', `<div class="row" style="justify-content:space-between;margin-bottom:14px"><span class="muted">${esc(cus?.name || 'Cash customer')}</span><span style="font-size:30px;font-weight:800">Rs ${money(t.total)}</span></div>
@@ -501,6 +503,10 @@ function payModal(done) {
       $('#go', m).onclick = async () => {
         const { f, ch } = calc(); $('#go', m).disabled = true;
         const pay = Object.fromEntries(methods.map(k => [k, r2(num(f[k]))]));
+        if (pay.credit && cus && num(cus.creditLimit) > 0 && num(cus.balance) + pay.credit > num(cus.creditLimit)) {
+          $('#go', m).disabled = false;
+          return toast(`Credit limit exceeded: ${cus.name} owes Rs ${money(cus.balance)}, limit Rs ${money(cus.creditLimit)}`, true);
+        }
         const change = Math.max(0, ch);
         const inv = {
           no: nextInvNo(), ts: Date.now(), day: today(), device: device().code,
@@ -591,21 +597,27 @@ VIEWS.returns = {
       inv = await findInvoice($('#ino', el).value);
       if (!inv) { $('#inv', el).innerHTML = '<div class="bad">Invoice not found</div>'; return; }
       invId = inv.id;
+      // how many of each item were already returned on this bill
+      inv._ret = {};
+      try { for (const r of await S.db.where('returns', 'invoiceId', inv.id)) for (const l of r.items || []) inv._ret[l.code] = (inv._ret[l.code] || 0) + num(l.qty); } catch (e) {}
+      lines = lines.filter(l => !l.inv); draw();
+      const left = l => Math.max(0, num(l.qty) - (inv._ret[l.code] || 0));
       const deleted = inv.status === 'void';
       $('#inv', el).innerHTML = `<div class="muted">${fmtDT(inv.ts)} · ${esc(inv.customerName)} · Rs ${money(inv.total)} ${deleted ? '<span class="tag r">DELETED</span>' : ''}</div><br>` +
-        inv.items.map((l, i) => `<div class="row" style="padding:6px 0"><span class="grow">${esc(l.name)} × ${qtyf(l.qty)}</span>${deleted ? '' : `<button class="btn sm" data-a="${i}">Return ${ic('returns')}</button>`}</div>`).join('') +
-        (deleted ? `<div class="bad" style="margin-top:10px">This bill was deleted${inv.voidBy ? ' by ' + esc(inv.voidBy) : ''}${inv.voidTs ? ' on ' + fmtDT(inv.voidTs) : ''}.</div>`
+        inv.items.map((l, i) => `<div class="row" style="padding:6px 0"><span class="grow">${esc(l.name)} × ${qtyf(l.qty)}${inv._ret[l.code] ? ` <span class="tag a">${qtyf(inv._ret[l.code])} returned</span>` : ''}</span>${deleted ? '' : left(l) > 0 ? `<button class="btn sm" data-a="${i}">Return ${ic('returns')}</button>` : '<span class="tag">All returned</span>'}</div>`).join('') +
+        (deleted || Object.keys(inv._ret).length ? (deleted ? '' : '<div class="muted" style="margin-top:10px">Some items were already returned, so the whole bill cannot be deleted. Return the remaining items one by one.</div>') + (deleted ? `<div class="bad" style="margin-top:10px">This bill was deleted${inv.voidBy ? ' by ' + esc(inv.voidBy) : ''}${inv.voidTs ? ' on ' + fmtDT(inv.voidTs) : ''}.</div>` : '')
           : `<div class="card" style="margin-top:14px;padding:14px;border-color:rgba(255,93,108,.4)"><b>Whole bill returned?</b><div class="muted" style="margin:4px 0 10px">Delete the bill and add all its items back to stock.</div><button class="btn d" id="delbill">${ic('trash')}Delete bill &amp; return all items</button></div>`);
       const db = $('#delbill', el);
       if (db) db.onclick = async () => { if (await deleteInvoice(inv, $('#rr', el).value)) { $('#ino', el).value = ''; find && setTimeout(() => { $('#inv', el).innerHTML = `<div class="good">Bill ${esc(inv.no)} deleted. Stock updated.</div>`; }, 50); } };
       if (inv.customerId) $('#rm', el).value = num(inv.pay?.credit) ? 'credit' : 'cash';
     };
-    $('#find', el).onclick = find; $('#ino', el).onkeydown = e => e.key === 'Enter' && find();
+    $('#find', el).onclick = find; $('#ino', el).onkeydown = e => { if (e.key === 'Enter') find(); };
     $('#inv', el).onclick = e => {
       const b = e.target.closest('[data-a]'); if (!b) return; const l = inv.items[b.dataset.a];
       const ex = lines.find(x => x.code === l.code && x.inv); if (ex) return;
       const unit = l.qty ? (l.qty * l.price - num(l.disc)) / l.qty * (inv.total / (inv.subtotal || inv.total)) : l.price;
-      lines.push({ code: l.code, name: l.name, qty: l.qty, max: l.qty, price: r2(unit), inv: true }); draw();
+      const max = Math.max(0, num(l.qty) - ((inv._ret || {})[l.code] || 0)); if (!max) return toast('This item was already fully returned', true);
+      lines.push({ code: l.code, name: l.name, qty: max, max, price: r2(unit), inv: true }); draw();
     };
     $('#mp', el).onchange = e => { const p = S.pmap[e.target.value]; if (p) $('#mpr', el).value = p.retail; };
     $('#madd', el).onclick = () => { const p = S.pmap[$('#mp', el).value]; if (!p) return; lines.push({ code: p.code, name: p.name, qty: num($('#mq', el).value) || 1, price: num($('#mpr', el).value) }); draw(); };
@@ -738,7 +750,7 @@ VIEWS.grn = {
       $('#c', el).value = sel.cost || ''; $('#mrp', el).value = sel.mrp || ''; $('#ret', el).value = sel.retail || ''; $('#loy', el).value = sel.loyalty || ''; $('#wh', el).value = sel.wholesale || '';
       $('#q', el).focus();
     };
-    $('#pq', el).onchange = pick; $('#pq', el).onkeydown = e => e.key === 'Enter' && pick();
+    $('#pq', el).onchange = pick; $('#pq', el).onkeydown = e => { if (e.key === 'Enter') pick(); };
     $('#tc', el).oninput = () => { const q = num($('#q', el).value); if (q) $('#c', el).value = r2(num($('#tc', el).value) / q); };
     $('#add', el).onclick = () => {
       if (!sel) return toast('Select a product', true);
